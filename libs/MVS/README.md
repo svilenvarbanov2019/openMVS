@@ -15,8 +15,10 @@ The `Scene` class acts as the central container for all MVS data, including:
 ### 2. Dense Reconstruction (`SceneDensify`)
 Generates a dense point cloud from the input images and sparse point cloud.
 - **Algorithms**:
-  - **PatchMatch**: A probabilistic algorithm for dense depth estimation. The implementation follows "Accurate Multiple View 3D Reconstruction Using Patch-Based Stereo for Large-Scale Scenes", S. Shen, 2013. It propagates depth and normal estimates between neighbors and refines them using random assignment, optimizing for the Zero-mean Normalized Cross-Correlation (ZNCC) score.
-  - **Semi-Global Matching (SGM)**: A CPU-based alternative.
+  - **PatchMatch**: A probabilistic algorithm for dense depth estimation that propagates depth and normal estimates between neighbors and refines them using random assignment. It is particularly effective for large-scale scenes.
+    - **Reference**: "Accurate Multiple View 3D Reconstruction Using Patch-Based Stereo for Large-Scale Scenes", Shuhan Shen. IEEE Transactions on Image Processing, 2013.
+  - **Semi-Global Matching (SGM)**: A robust stereo matching algorithm that approximates global energy minimization by aggregating matching costs along multiple 1D paths (typically 4 or 8) through the image. It uses a smoothness constraint to penalize small changes in disparity.
+    - **Reference**: "Stereo Processing by Semiglobal Matching and Mutual Information", Heiko Hirschmüller. IEEE Transactions on Pattern Analysis and Machine Intelligence, 2008.
 - **Fusion**: Depth maps are fused into a single point cloud. The process involves:
   - **Geometric Consistency**: Filtering depth estimates that do not agree across multiple views.
   - **Confidence merging**: Averaging depth values weighted by their confidence (derived from ZNCC scores).
