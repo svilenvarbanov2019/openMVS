@@ -23,7 +23,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest,  macOS-latest, windows-latest]
         include:
           - os: windows-latest
             triplet: x64-windows-release
@@ -32,32 +31,44 @@ jobs:
             triplet: x64-linux-release
             build-type: Release
           - os: macos-latest
-            triplet: x64-osx
+            triplet: arm64-osx
             build-type: Release
+    env:
+      # Turn on manifests and binary caching; use the GHA backend
+      VCPKG_FEATURE_FLAGS: manifests,binarycaching,registries
+      VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
+      VCPKG_DEFAULT_TRIPLET: ${{ matrix.triplet }}
+      VCPKG_COMMIT: 'ef7dbf94b9198bc58f45951adcf1f041fcbc5ea0'
+
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      - name: Restore artifacts, or setup vcpkg for building artifacts
+      - name: Setup vcpkg and cache artifacts
         uses: lukka/run-vcpkg@v11
         with:
-          vcpkgDirectory: '${{ github.workspace }}/vcpkg'
-          vcpkgGitCommitId: '4a3c366f2d0d0eaf034bfa649124768df7cfe813'
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
 
       - name: Install Ubuntu dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y autoconf-archive libxmu-dev libdbus-1-dev libxtst-dev libxi-dev libxinerama-dev libxcursor-dev xorg-dev libgl-dev libglu1-mesa-dev pkg-config
+          sudo apt-get install -y autoconf-archive libxmu-dev libdbus-1-dev libxtst-dev libxi-dev libxinerama-dev libxcursor-dev xorg-dev libgl-dev libglu1-mesa-dev autoconf automake bison libtool libltdl-dev pkg-config ninja-build
 
       - name: Install macOS dependencies
-        if: matrix.os == 'macOS-latest'
+        if: matrix.os == 'macos-latest'
         run: |
-          brew install automake autoconf-archive
+          brew install automake autoconf autoconf-archive libtool ninja
 
-      - name: Configure CMake
+      - name: Configure CMake for Windows
+        if: matrix.os == 'windows-latest'
         run: |
           cmake -S . -B make -DCMAKE_BUILD_TYPE=${{ matrix.build-type }} -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DOpenMVS_USE_CUDA=OFF
+
+      - name: Configure CMake for Ubuntu and macOS
+        if: matrix.os != 'windows-latest'
+        run: |
+          cmake -S . -B make -DCMAKE_BUILD_TYPE=${{ matrix.build-type }} -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DOpenMVS_USE_CUDA=OFF -G Ninja
 
       - name: Build
         working-directory: ./make
@@ -73,9 +84,27 @@ jobs:
 
       - name: Deploy Windows release
         if: matrix.os == 'windows-latest'
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: OpenMVS_Windows_Release_x64
           path: |
             ${{ github.workspace }}/make/bin/**/x64
+            !${{ github.workspace }}/make/bin/**/*.exp
+
+      - name: Deploy Ubuntu release
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenMVS_Ubuntu_Release_x64
+          path: |
+            ${{ github.workspace }}/make/bin/**
+            !${{ github.workspace }}/make/bin/**/*.exp
+
+      - name: Deploy macOS release
+        if: matrix.os == 'macos-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenMVS_macOS_Release_arm64
+          path: |
+            ${{ github.workspace }}/make/bin/**
             !${{ github.workspace }}/make/bin/**/*.exp

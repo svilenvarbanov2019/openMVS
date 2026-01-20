@@ -62,8 +62,6 @@ macro(GetOperatingSystemArchitectureBitness)
 		if(CMAKE_SYSTEM_PROCESSOR MATCHES "powerpc")
 			set(${MY_VAR_PREFIX}_ARCHITECTURE "ppc")
 		endif()
-	#elseif(CMAKE_SYSTEM_NAME STREQUAL "Solaris")
-		#set(${MY_VAR_PREFIX}_BUILD "solaris8") # What about solaris9 and solaris10 ?
 	endif()
 
 	# Detect Microsoft compiler:
@@ -360,14 +358,17 @@ macro(add_extra_compiler_option option)
   if(CMAKE_BUILD_TYPE)
     set(CMAKE_TRY_COMPILE_CONFIGURATION ${CMAKE_BUILD_TYPE})
   endif()
-  _check_flag_support(CXX "${option}" _varname "${BUILD_EXTRA_CXX_FLAGS} ${ARGN}")
-  if(${_varname})
-    set(BUILD_EXTRA_CXX_FLAGS "${BUILD_EXTRA_CXX_FLAGS} ${option}")
+  if(CMAKE_CXX_COMPILER_ID)
+    _check_flag_support(CXX "${option}" _varname "${BUILD_EXTRA_CXX_FLAGS} ${ARGN}")
+    if(${_varname})
+      set(BUILD_EXTRA_CXX_FLAGS "${BUILD_EXTRA_CXX_FLAGS} ${option}")
+    endif()
   endif()
-
-  _check_flag_support(C "${option}" _varname "${BUILD_EXTRA_C_FLAGS} ${ARGN}")
-  if(${_varname})
-    set(BUILD_EXTRA_C_FLAGS "${BUILD_EXTRA_C_FLAGS} ${option}")
+  if(CMAKE_C_COMPILER_ID)
+    _check_flag_support(C "${option}" _varname "${BUILD_EXTRA_C_FLAGS} ${ARGN}")
+    if(${_varname})
+      set(BUILD_EXTRA_C_FLAGS "${BUILD_EXTRA_C_FLAGS} ${option}")
+    endif()
   endif()
 endmacro()
 
@@ -400,18 +401,21 @@ macro(optimize_default_compiler_settings)
 	set(BUILD_EXTRA_EXE_LINKER_FLAGS_RELEASE "")
 	set(BUILD_EXTRA_EXE_LINKER_FLAGS_DEBUG "")
 
-	# try to enable C++14/C++11 support
+	# try to enable C++XX support
 	if(CMAKE_VERSION VERSION_LESS "3.8.2")
 		if (MSVC)
 			set(CXX_CHECK_PREFIX "/std:")
 		else()
 			set(CXX_CHECK_PREFIX "--std=")
 		endif()
+		check_cxx_compiler_flag("${CXX_CHECK_PREFIX}c++23" SUPPORTS_STD_CXX23)
 		check_cxx_compiler_flag("${CXX_CHECK_PREFIX}c++20" SUPPORTS_STD_CXX20)
 		check_cxx_compiler_flag("${CXX_CHECK_PREFIX}c++17" SUPPORTS_STD_CXX17)
 		check_cxx_compiler_flag("${CXX_CHECK_PREFIX}c++14" SUPPORTS_STD_CXX14)
 		check_cxx_compiler_flag("${CXX_CHECK_PREFIX}c++11" SUPPORTS_STD_CXX11)
-		if(SUPPORTS_STD_CXX20)
+		if(SUPPORTS_STD_CXX23)
+			set(CMAKE_CXX_STANDARD 23)
+		elseif(SUPPORTS_STD_CXX20)
 			set(CMAKE_CXX_STANDARD 20)
 		elseif(SUPPORTS_STD_CXX17)
 			set(CMAKE_CXX_STANDARD 17)
@@ -421,33 +425,38 @@ macro(optimize_default_compiler_settings)
 			set(CMAKE_CXX_STANDARD 11)
 		endif()
 	else()
-		list(FIND CMAKE_CXX_COMPILE_FEATURES "cxx_std_20" CXX_STD_INDEX)
+		list(FIND CMAKE_CXX_COMPILE_FEATURES "cxx_std_23" CXX_STD_INDEX)
 		if(${CXX_STD_INDEX} GREATER -1)
-			set(CMAKE_CXX_STANDARD 20)
+			set(CMAKE_CXX_STANDARD 23)
 		else()
-			list(FIND CMAKE_CXX_COMPILE_FEATURES "cxx_std_17" CXX_STD_INDEX)
+			list(FIND CMAKE_CXX_COMPILE_FEATURES "cxx_std_20" CXX_STD_INDEX)
 			if(${CXX_STD_INDEX} GREATER -1)
-				set(CMAKE_CXX_STANDARD 17)
+				set(CMAKE_CXX_STANDARD 20)
 			else()
-				list(FIND CMAKE_CXX_COMPILE_FEATURES "cxx_std_14" CXX_STD_INDEX)
+				list(FIND CMAKE_CXX_COMPILE_FEATURES "cxx_std_17" CXX_STD_INDEX)
 				if(${CXX_STD_INDEX} GREATER -1)
-					set(CMAKE_CXX_STANDARD 14)
+					set(CMAKE_CXX_STANDARD 17)
 				else()
-					list(FIND CMAKE_CXX_COMPILE_FEATURES "cxx_std_11" CXX_STD_INDEX)
+					list(FIND CMAKE_CXX_COMPILE_FEATURES "cxx_std_14" CXX_STD_INDEX)
 					if(${CXX_STD_INDEX} GREATER -1)
-						set(CMAKE_CXX_STANDARD 11)
+						set(CMAKE_CXX_STANDARD 14)
+					else()
+						list(FIND CMAKE_CXX_COMPILE_FEATURES "cxx_std_11" CXX_STD_INDEX)
+						if(${CXX_STD_INDEX} GREATER -1)
+							set(CMAKE_CXX_STANDARD 11)
+						endif()
 					endif()
 				endif()
 			endif()
 		endif()
 	endif()
-	if(CLANG AND (CMAKE_CXX_STANDARD EQUAL 11 OR CMAKE_CXX_STANDARD EQUAL 14 OR CMAKE_CXX_STANDARD EQUAL 17 OR CMAKE_CXX_STANDARD EQUAL 20))
+	if(CLANG AND (CMAKE_CXX_STANDARD EQUAL 11 OR CMAKE_CXX_STANDARD EQUAL 14 OR CMAKE_CXX_STANDARD EQUAL 17 OR CMAKE_CXX_STANDARD EQUAL 20 OR CMAKE_CXX_STANDARD EQUAL 23))
 		set(CMAKE_EXE_LINKER_FLAGS "-stdlib=libc++")
 		add_extra_compiler_option(-stdlib=libc++)
 	endif()
 	set(CMAKE_CXX_STANDARD_REQUIRED ON)
 	set(CMAKE_CXX_EXTENSIONS OFF)
-	message("Compiling with C++${CMAKE_CXX_STANDARD}")
+	message(STATUS "Compiling with C++${CMAKE_CXX_STANDARD}")
 
 	if(FLG_COMPILER_IS_GNU)
 	  # High level of warnings.
@@ -476,26 +485,30 @@ macro(optimize_default_compiler_settings)
 		add_extra_compiler_option(-Wswitch-enum)
 		add_extra_compiler_option(-Wswitch-default)
 	  else()
-		add_extra_compiler_option(-Wno-undef)
-		add_extra_compiler_option(-Wno-switch)
-		add_extra_compiler_option(-Wno-switch-enum)
-		add_extra_compiler_option(-Wno-switch-default)
-		add_extra_compiler_option(-Wno-implicit-fallthrough)
-		add_extra_compiler_option(-Wno-comment)
-		add_extra_compiler_option(-Wno-narrowing)
 		add_extra_compiler_option(-Wno-attributes)
-		add_extra_compiler_option(-Wno-ignored-attributes)
-		add_extra_compiler_option(-Wno-maybe-uninitialized)
+		add_extra_compiler_option(-Wno-comment)
+		add_extra_compiler_option(-Wno-deprecated-anon-enum-enum-conversion)
+		add_extra_compiler_option(-Wno-deprecated-declarations)
+		add_extra_compiler_option(-Wno-deprecated-enum-compare-conditional)
+		add_extra_compiler_option(-Wno-deprecated-enum-enum-conversion)
+		add_extra_compiler_option(-Wno-delete-incomplete)
 		add_extra_compiler_option(-Wno-enum-compare)
+		add_extra_compiler_option(-Wno-ignored-attributes)
+		add_extra_compiler_option(-Wno-implicit-fallthrough)
+		add_extra_compiler_option(-Wno-int-in-bool-context)
+		add_extra_compiler_option(-Wno-maybe-uninitialized)
 		add_extra_compiler_option(-Wno-misleading-indentation)
 		add_extra_compiler_option(-Wno-missing-field-initializers)
-		add_extra_compiler_option(-Wno-unused-result)
+		add_extra_compiler_option(-Wno-narrowing)
+		add_extra_compiler_option(-Wno-nonportable-include-path)
+		add_extra_compiler_option(-Wno-switch)
+		add_extra_compiler_option(-Wno-switch-default)
+		add_extra_compiler_option(-Wno-switch-enum)
+		add_extra_compiler_option(-Wno-undef)
+		add_extra_compiler_option(-Wno-unnamed-type-template-args)
 		add_extra_compiler_option(-Wno-unused-function)
 		add_extra_compiler_option(-Wno-unused-parameter)
-		add_extra_compiler_option(-Wno-delete-incomplete)
-		add_extra_compiler_option(-Wno-unnamed-type-template-args)
-		add_extra_compiler_option(-Wno-int-in-bool-context)
-		add_extra_compiler_option(-Wno-deprecated-declarations)
+		add_extra_compiler_option(-Wno-unused-result)
 	  endif()
 	  add_extra_compiler_option(-fdiagnostics-show-option)
 	  add_extra_compiler_option(-ftemplate-backtrace-limit=0)
@@ -653,6 +666,12 @@ macro(optimize_default_compiler_settings)
 	  set(BUILD_EXTRA_FLAGS "${BUILD_EXTRA_FLAGS} /Zc:__cplusplus")
 	endif()
 
+	# Fix macOS linker warnings about reducing alignment from 0x8000 to 0x4000
+	# This is caused by Eigen's alignment requirements exceeding macOS segment max alignment
+	if(APPLE)
+		set(BUILD_EXTRA_EXE_LINKER_FLAGS "${BUILD_EXTRA_EXE_LINKER_FLAGS} -Wl,-w")
+	endif()
+
 	# Extra link libs if the user selects building static libs:
 	# Android does not need these settings because they are already set by toolchain file
 	if(CMAKE_COMPILER_IS_GNUCXX AND NOT ANDROID AND NOT BUILD_SHARED_LIBS)
@@ -704,7 +723,6 @@ macro(optimize_default_compiler_settings)
 		string(REPLACE "/Zm1000" "" ${flags} "${${flags}}")
 	  endforeach()
 	endif()
-	CHECK_INCLUDE_FILE("inttypes.h" HAVE_INTTYPES_H)
 endmacro()
 
 
@@ -770,8 +788,7 @@ macro(ConfigCompilerAndLinker)
     # RTTI are enabled, so we define GTEST_HAS_* explicitly.
     set(cxx_no_exception_flags "-features=no%except -DGTEST_HAS_EXCEPTIONS=0")
     set(cxx_no_rtti_flags "-features=no%rtti -DGTEST_HAS_RTTI=0")
-  elseif (CMAKE_CXX_COMPILER_ID STREQUAL "VisualAge" OR
-      CMAKE_CXX_COMPILER_ID STREQUAL "XL")
+  elseif (CMAKE_CXX_COMPILER_ID STREQUAL "VisualAge" OR CMAKE_CXX_COMPILER_ID STREQUAL "XL")
     # CMake 2.8 changes Visual Age's compiler ID to "XL".
     set(cxx_exception_flags "-qeh")
     set(cxx_no_exception_flags "-qnoeh")
@@ -801,8 +818,13 @@ macro(ConfigCompilerAndLinker)
     set(cxx_rtti_support "${cxx_no_rtti_flags}")
   endif()
   
-  SET(cxx_default "${cxx_exception_support} ${cxx_rtti_support}" CACHE PATH "Common compile CXX flags")
-  SET(c_default "${CMAKE_C_FLAGS} ${cxx_base_flags}" CACHE PATH "Common compile C flags")
+  set(cxx_default "${cxx_exception_support} ${cxx_rtti_support}" CACHE PATH "Common compile CXX flags")
+  set(c_default "${CMAKE_C_FLAGS} ${cxx_base_flags}" CACHE PATH "Common compile C flags")
+
+  if(APPLE)
+    # Mitigate CMake limitation, see: https://discourse.cmake.org/t/avoid-duplicate-linking-to-avoid-xcode-15-warnings/9084/10
+    add_link_options(LINKER:-no_warn_duplicate_libraries)
+  endif()
 endmacro()
 
 # Initialize variables needed for a library type project.
@@ -829,6 +851,50 @@ macro(ConfigLibrary)
 		set(${var} "${${varp}}/${PROJECT_NAME}")
 	endforeach()
 endmacro()
+
+function(create_rc_files name)
+  # Create the manifest file
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/app.manifest" 
+    "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+    <assembly manifestVersion='1.0' xmlns='urn:schemas-microsoft-com:asm.v1'>
+      <assemblyIdentity type='win32' name='${name}' version='1.0.0.0'/>
+      <trustInfo xmlns='urn:schemas-microsoft-com:asm.v2'>
+        <security>
+          <requestedPrivileges xmlns='urn:schemas-microsoft-com:asm.v3'>
+            <requestedExecutionLevel level='asInvoker' uiAccess='false'/>
+          </requestedPrivileges>
+        </security>
+      </trustInfo>
+      <compatibility xmlns='urn:schemas-microsoft-com:compatibility.v1'>
+        <application>
+          <!-- Windows Vista -->
+          <supportedOS Id='{e2011457-1546-43c5-a5fe-008deee3d3f0}'/>
+          <!-- Windows 7 -->
+          <supportedOS Id='{35138b9a-5d96-4fbd-8e2d-a2440225f93a}'/>
+          <!-- Windows 8 -->
+          <supportedOS Id='{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}'/>
+          <!-- Windows 8.1 -->
+          <supportedOS Id='{1f676c76-80e1-4239-95bb-83d0f6d0da78}'/>
+          <!-- Windows 10 and Windows 11 -->
+          <supportedOS Id='{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}'/>
+        </application>
+      </compatibility>
+    </assembly>
+  ")
+
+  # Create an RC file that includes the manifest
+  if(NOT "${ARGN}" STREQUAL "")
+    set(RC_ICO "
+      #define IDI_ICON_APP 101
+      IDI_ICON_APP ICON DISCARDABLE \"${ARGN}\"
+	")
+  endif()
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/app.rc"
+    "#include <windows.h>
+    1 RT_MANIFEST \"app.manifest\"
+    ${RC_ICO}
+  ")
+endfunction()
 
 # Defines the main libraries.  User tests should link
 # with one of them.
@@ -865,4 +931,13 @@ function(cxx_executable_with_flags name folder cxx_flags libs)
   endforeach()
   # Set project folder
   set_target_properties("${name}" PROPERTIES FOLDER "${folder}")
+  if (MSVC)
+    # Check if any of the files listed in ARGN has the extension .rc
+    foreach (file ${ARGN})
+      if (file MATCHES "\\.rc$")
+        set_target_properties("${name}" PROPERTIES LINK_FLAGS "/MANIFEST:NO")
+        break()
+      endif()
+    endforeach()
+  endif()
 endfunction()

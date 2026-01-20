@@ -52,31 +52,70 @@ namespace SEACAVE {
 // S T R U C T S ///////////////////////////////////////////////////
 
 // Manage setting/removing bit flags
+// TYPE can be either an integer type or an enum type
 template <typename TYPE>
 class TFlags
 {
+private:
+	// Helper trait to get the underlying type for both enums and integer types
+	template<typename T, bool = std::is_enum<T>::value>
+	struct UnderlyingTypeHelper {
+		typedef T type;
+	};
+	template<typename T>
+	struct UnderlyingTypeHelper<T, true> {
+		typedef typename std::underlying_type<T>::type type;
+	};
+
 public:
+	typedef typename UnderlyingTypeHelper<TYPE>::type UnderlyingType;
 	typedef TYPE Type;
 
 public:
-	inline TFlags() : flags(0)							{ }
+	inline TFlags() : flags(static_cast<Type>(0))		{ }
 	inline TFlags(const TFlags& rhs) : flags(rhs.flags)	{ }
 	inline TFlags(Type f) : flags(f)					{ }
-	inline bool isSet(Type aFlag) const					{ return (flags & aFlag) == aFlag; }
-	inline bool isSet(Type aFlag, Type nF) const		{ return (flags & (aFlag|nF)) == aFlag; }
-	inline bool isSetExclusive(Type aFlag) const		{ return flags == aFlag; }
-	inline bool isAnySet(Type aFlag) const				{ return (flags & aFlag) != 0; }
-	inline bool isAnySet(Type aFlag, Type nF) const		{ const Type m(flags & (aFlag|nF)); return m != 0 && (m & nF) == 0; }
-	inline bool isAnySetExclusive(Type aFlag) const		{ return (flags & aFlag) != 0 && (flags & ~aFlag) == 0; }
-	inline void set(Type aFlag, bool bSet)				{ if (bSet) set(aFlag); else unset(aFlag); }
-	inline void set(Type aFlag)							{ flags |= aFlag; }
-	inline void unset(Type aFlag)						{ flags &= ~aFlag; }
-	inline void flip(Type aFlag)						{ flags ^= aFlag; }
-	inline void operator=(TFlags rhs)					{ flags = rhs.flags; }
-	inline operator Type() const						{ return flags; }
-	inline operator Type&()								{ return flags; }
+	// Only define this constructor when Type and UnderlyingType are different (i.e., for enums)
+	template<typename U = UnderlyingType, typename = typename std::enable_if<!std::is_same<Type, U>::value>::type>
+	inline TFlags(U f) : flags(static_cast<Type>(static_cast<UnderlyingType>(f)))	{ }
+
+	// Accept both enum and underlying type for compatibility
+	template<typename T>
+	inline bool isSet(T aFlag) const					{ return (toUnderlying(flags) & toUnderlying(aFlag)) == toUnderlying(aFlag); }
+	template<typename T1, typename T2>
+	inline bool isSet(T1 aFlag, T2 nF) const			{ return (toUnderlying(flags) & (toUnderlying(aFlag)|toUnderlying(nF))) == toUnderlying(aFlag); }
+	template<typename T>
+	inline bool isSetExclusive(T aFlag) const			{ return toUnderlying(flags) == toUnderlying(aFlag); }
+	template<typename T>
+	inline bool isAnySet(T aFlag) const					{ return (toUnderlying(flags) & toUnderlying(aFlag)) != 0; }
+	template<typename T1, typename T2>
+	inline bool isAnySet(T1 aFlag, T2 nF) const			{ const UnderlyingType m(toUnderlying(flags) & (toUnderlying(aFlag)|toUnderlying(nF))); return m != 0 && (m & toUnderlying(nF)) == 0; }
+	template<typename T>
+	inline bool isAnySetExclusive(T aFlag) const		{ return (toUnderlying(flags) & toUnderlying(aFlag)) != 0 && (toUnderlying(flags) & ~toUnderlying(aFlag)) == 0; }
+
+	template<typename T>
+	inline void set(T aFlag, bool bSet)					{ if (bSet) set(aFlag); else unset(aFlag); }
+	template<typename T>
+	inline void set(T aFlag)							{ flags = static_cast<Type>(toUnderlying(flags) | toUnderlying(aFlag)); }
+	template<typename T>
+	inline void unset(T aFlag)							{ flags = static_cast<Type>(toUnderlying(flags) & ~toUnderlying(aFlag)); }
+	template<typename T>
+	inline void flip(T aFlag)							{ flags = static_cast<Type>(toUnderlying(flags) ^ toUnderlying(aFlag)); }
+
+	inline TFlags& operator=(TFlags rhs)				{ flags = rhs.flags; return *this; }
+	inline TFlags& operator=(Type f)					{ flags = f; return *this; }
+	inline operator UnderlyingType() const				{ return static_cast<UnderlyingType>(flags); }
+	inline operator UnderlyingType&()					{ return reinterpret_cast<UnderlyingType&>(flags); }
+
 protected:
 	Type flags;
+
+	// Helper to convert enum or integer to underlying type
+	template<typename T>
+	static inline constexpr UnderlyingType toUnderlying(T value) {
+		return static_cast<UnderlyingType>(value);
+	}
+
 	#ifdef _USE_BOOST
 	// implement BOOST serialization
 	friend class boost::serialization::access;
@@ -183,10 +222,10 @@ public:
 		std::ostringstream os;
 		os.precision(3);
 		os << sTitle << "\n";
-		const size_t n(Freq.size());
-		for (size_t i = 0; i < n; ++i)
+		os << "<" << Start << "\t|\t" << Underflow << "\n";
+		for (size_t i = 0, n = Freq.size(); i < n; ++i)
 			os << static_cast<float>(End-Start)/n*static_cast<float>(i) << "\t|\t" << Freq[i] << "\n";
-		os << End << "\n";
+		os << ">=" << End << "\t|\t" << Overflow << "\n";
 		return os.str();
 	}
 
@@ -550,6 +589,63 @@ public:
 		}
 	}
 
+	// Parse index ranges; use commas/spaces to separate IDs and '-' for ranges (e.g., 1 2 10-15)
+	// returns error message in case of failure
+	static String parseIndexRanges(LPCSTR input, size_t maxCount, CLISTDEFSCALAR(IDX)& outIndices, LPCSTR entityLabel="") {
+		outIndices.clear();
+		if (input == nullptr || *input == '\0')
+			return String::FormatString("No %sdata available.", entityLabel);
+		if (maxCount == 0)
+			return String::FormatString("No %sdata size available.", entityLabel);
+		auto skipDelimiters = [](LPCSTR& cursor) {
+			while (*cursor && (std::isspace(*cursor) || *cursor == ','))
+				++cursor;
+		};
+		auto parseNumber = [](LPCSTR& cursor, IDX& value) -> bool {
+			if (!*cursor || !std::isdigit(*cursor))
+				return false;
+			value = 0;
+			const IDX maxValue = std::numeric_limits<IDX>::max();
+			while (*cursor && std::isdigit(*cursor)) {
+				const IDX digit = static_cast<IDX>(*cursor - '0');
+				if (value > (maxValue - digit) / 10)
+					return false;
+				value = value * 10 + digit;
+				++cursor;
+			}
+			return true;
+		};
+		LPCSTR cursor = input;
+		while (true) {
+			skipDelimiters(cursor);
+			if (*cursor == '\0')
+				break;
+			// Parse start of range
+			IDX startValue;
+			if (!parseNumber(cursor, startValue))
+				return String::FormatString("Invalid %sindex specification.", entityLabel);
+			skipDelimiters(cursor);
+			IDX endValue = startValue;
+			if (*cursor == '-') {
+				skipDelimiters(++cursor);
+				if (!parseNumber(cursor, endValue))
+					return String::FormatString("Incomplete %srange specification.", entityLabel);
+			}
+			if (startValue >= maxCount)
+				return String::FormatString("%sindex %zu out of range (0-%zu).", entityLabel, size_t(startValue), maxCount - 1);
+			if (endValue >= maxCount)
+				return String::FormatString("%sindex %zu out of range (0-%zu).", entityLabel, size_t(endValue), maxCount - 1);
+			if (endValue < startValue)
+				return String::FormatString("Invalid %srange: %zu-%zu.", entityLabel, size_t(startValue), size_t(endValue));
+			for (IDX idx = startValue; idx <= endValue; ++idx)
+				outIndices.push_back(idx);
+		}
+		if (outIndices.empty())
+			return String::FormatString("No valid %sindices provided.", entityLabel);
+		return {}; // success
+	}
+
+
 	static String getShortTimeString() {
 		char buf[8];
 		time_t _tt = time(NULL);
@@ -598,34 +694,34 @@ public:
 		uint32_t rez = (uint32_t)(sTime / ((int64_t)24*3600*1000));
 		if (rez) {
 			++nrNumbers;
-			len += _sntprintf(buf+len, 128, "%ud", rez);
+			len += _sntprintf(buf, 128, "%ud", rez);
 		}
 		if (nAproximate > 3 && nrNumbers > 0)
 			return buf;
 		rez = (uint32_t)((sTime%((int64_t)24*3600*1000)) / (3600*1000));
 		if (rez) {
 			++nrNumbers;
-			len += _sntprintf(buf+len, 128, "%uh", rez);
+			len += _sntprintf(buf+len, 128-len, "%uh", rez);
 		}
 		if (nAproximate > 2 && nrNumbers > 0)
 			return buf;
 		rez = (uint32_t)((sTime%((int64_t)3600*1000)) / (60*1000));
 		if (rez) {
 			++nrNumbers;
-			len += _sntprintf(buf+len, 128, "%um", rez);
+			len += _sntprintf(buf+len, 128-len, "%um", rez);
 		}
 		if (nAproximate > 1 && nrNumbers > 0)
 			return buf;
 		rez = (uint32_t)((sTime%((int64_t)60*1000)) / (1*1000));
 		if (rez) {
 			++nrNumbers;
-			len += _sntprintf(buf+len, 128, "%us", rez);
+			len += _sntprintf(buf+len, 128-len, "%us", rez);
 		}
 		if (nAproximate > 0 && nrNumbers > 0)
 			return buf;
 		rez = (uint32_t)(sTime%((int64_t)1*1000));
 		if (rez || !nrNumbers)
-			len += _sntprintf(buf+len, 128, "%ums", rez);
+			len += _sntprintf(buf+len, 128-len, "%ums", rez);
 
 		return String(buf, len);
 	}
@@ -699,54 +795,6 @@ public:
 	}
 
 
-	/**
-	 * IPRT - CRC64.
-	 *
-	 * The method to compute the CRC64 is referred to as CRC-64-ISO:
-	 *     http://en.wikipedia.org/wiki/Cyclic_redundancy_check
-	 * The generator polynomial is x^64 + x^4 + x^3 + x + 1.
-	 *     Reverse polynom: 0xd800000000000000ULL
-	 *     
-	 * As in: http://www.virtualbox.org/svn/vbox/trunk/src/VBox/Runtime/common/checksum/crc64.cpp
-	 */
-
-	/**
-	 * Calculate CRC64 for a memory block.
-	 *
-	 * @returns CRC64 for the memory block.
-	 * @param   pv      Pointer to the memory block.
-	 * @param   cb      Size of the memory block in bytes.
-	 */
-	static uint64_t CRC64(const void *pv, size_t cb);
-
-	/**
-	 * Start a multiblock CRC64 calculation.
-	 *
-	 * @returns Start CRC64.
-	 */
-	static uint64_t CRC64Start() {
-		return 0ULL;
-	}
-	/**
-	 * Processes a multiblock of a CRC64 calculation.
-	 *
-	 * @returns Intermediate CRC64 value.
-	 * @param   uCRC64  Current CRC64 intermediate value.
-	 * @param   pv      The data block to process.
-	 * @param   cb      The size of the data block in bytes.
-	 */
-	static uint64_t CRC64Process(uint64_t uCRC64, const void *pv, size_t cb);
-	/**
-	 * Complete a multiblock CRC64 calculation.
-	 *
-	 * @returns CRC64 value.
-	 * @param   uCRC64  Current CRC64 intermediate value.
-	 */
-	static uint64_t CRC64Finish(uint64_t uCRC64) {
-		return uCRC64;
-	}
-
-
 	static void		Init();
 
 	static String	GetCPUInfo();
@@ -758,6 +806,16 @@ public:
 
 	static void		LogBuild();
 	static void		LogMemoryInfo();
+
+	struct MemoryInfo {
+		size_t totalPhysical;
+		size_t freePhysical;
+		size_t totalVirtual;
+		size_t freeVirtual;
+		MemoryInfo(size_t tP = 0, size_t fP = 0, size_t tV = 0, size_t fV = 0)
+			: totalPhysical(tP), freePhysical(fP), totalVirtual(tV), freeVirtual(fV) {}
+	};
+	static MemoryInfo GetMemoryInfo();
 
 	static LPSTR* CommandLineToArgvA(LPCSTR CmdLine, size_t& _argc);
 	static String CommandLineToString(size_t argc, LPCTSTR* argv) {

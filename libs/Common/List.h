@@ -12,6 +12,7 @@
 // I N C L U D E S /////////////////////////////////////////////////
 
 #include <utility>
+#include <type_traits>
 
 
 // D E F I N E S ///////////////////////////////////////////////////
@@ -68,6 +69,7 @@
 #define CLISTREFVECTOR(CLIST, var, vec) uint8_t _ArrData##var[sizeof(CLIST)]; new(_ArrData##var) CLIST(vec.size(), const_cast<CLIST::Type*>(&vec[0])); const CLIST& var(*reinterpret_cast<const CLIST*>(_ArrData##var))
 #endif
 
+#define CLISTDEFSCALAR(TYPE) SEACAVE::cList< TYPE, TYPE, 0 >
 #define CLISTDEF0(TYPE) SEACAVE::cList< TYPE, const TYPE&, 0 >
 #define CLISTDEF2(TYPE) SEACAVE::cList< TYPE, const TYPE&, 2 >
 #define CLISTDEF0IDX(TYPE,IDXTYPE) SEACAVE::cList< TYPE, const TYPE&, 0, 16, IDXTYPE >
@@ -121,48 +123,71 @@ public:
 	}
 
 	// construct a list containing size initialized elements
-	cList(IDX size) : _size(size), _vectorSize(size), _vector((TYPE*)operator new[] (size * sizeof(TYPE)))
+	inline cList(IDX size) :
+		_size(size), _vectorSize(size), _vector((TYPE*)operator new[] (static_cast<size_t>(size) * sizeof(TYPE)))
 	{
 		ASSERT(size > 0 && size < NO_INDEX);
 		_ArrayConstruct(_vector, size);
 	}
 
 	// construct a list containing size initialized elements and allocated space for _reserved elements
-	cList(IDX size, IDX _reserved) : _size(size), _vectorSize(_reserved), _vector((TYPE*)operator new[] (_reserved * sizeof(TYPE)))
+	explicit cList(IDX size, IDX _reserved) :
+		_size(size), _vectorSize(_reserved), _vector((TYPE*)operator new[] (static_cast<size_t>(_reserved) * sizeof(TYPE)))
 	{
 		ASSERT(_reserved >= size && _reserved < NO_INDEX);
 		_ArrayConstruct(_vector, size);
 	}
 
+	// construct a list containing size initialized elements, set elements to given value, and allocated space for _reserved elements
+	explicit cList(IDX size, const Type& val, IDX _reserved) :
+	    _size(size), _vectorSize(_reserved), _vector((TYPE*)operator new[](static_cast<size_t>(_reserved) * sizeof(TYPE)))
+	{
+		ASSERT(_reserved >= size && _reserved < NO_INDEX);
+		_ArrayConstruct(_vector, size, val);
+	}
+
+	// construct a list from the contents of the range [first, last)
+	template <class InputIt>
+	explicit cList(InputIt first, InputIt last, bool /*dummy*/) :
+		_size(0), _vectorSize(std::distance(first, last)), _vector(NULL)
+	{
+		if (_vectorSize == 0)
+			return;
+		_vector = (TYPE*)(operator new[] (static_cast<size_t>(_vectorSize) * sizeof(TYPE)));
+		while (first != last)
+			Insert(*first++);
+	}
+
+
 	// copy constructor: creates a deep-copy of the given list
-	cList(const cList& rList) : _size(rList._size), _vectorSize(rList._vectorSize), _vector(NULL)
+	cList(const cList& rList) :
+		_size(rList._size), _vectorSize(rList._vectorSize), _vector(NULL)
 	{
 		if (_vectorSize == 0) {
 			ASSERT(_size == 0);
 			return;
 		}
-		_vector = (TYPE*)(operator new[] (_vectorSize * sizeof(TYPE)));
+		_vector = (TYPE*)(operator new[] (static_cast<size_t>(_vectorSize) * sizeof(TYPE)));
 		_ArrayCopyConstruct(_vector, rList._vector, _size);
 	}
-	#ifdef _SUPPORT_CPP11
-	// copy constructor: creates a move-copy of the given list
-	cList(cList&& rList) : _size(rList._size), _vectorSize(rList._vectorSize), _vector(rList._vector)
+	// move constructor: creates a move-copy of the given list
+	cList(cList&& rList) :
+	    _size(rList._size), _vectorSize(rList._vectorSize), _vector(rList._vector)
 	{
 		rList._Init();
 	}
-	#endif
 
 	// constructor a list from a raw data array
-	explicit inline cList(TYPE* pDataBegin, TYPE* pDataEnd) : _size((IDX)(pDataEnd-pDataBegin)), _vectorSize(_size)
+	explicit cList(TYPE* pDataBegin, TYPE* pDataEnd) : _size((IDX)(pDataEnd-pDataBegin)), _vectorSize(_size)
 	{
 		if (_vectorSize == 0)
 			return;
-		_vector = (TYPE*) operator new[] (_vectorSize * sizeof(TYPE));
+		_vector = (TYPE*) operator new[] (static_cast<size_t>(_vectorSize) * sizeof(TYPE));
 		_ArrayCopyConstruct(_vector, pDataBegin, _size);
 	}
 
 	// constructor a list from a raw data array, taking ownership of the array memory
-	explicit inline cList(IDX nSize, TYPE* pData) : _size(nSize), _vectorSize(nSize), _vector(pData)
+	explicit cList(IDX nSize, TYPE* pData) : _size(nSize), _vectorSize(nSize), _vector(pData)
 	{
 	}
 
@@ -171,6 +196,11 @@ public:
 		_Release();
 	}
 
+	// move the content from the given list
+	inline cList&	operator=(cList&& rList)
+	{
+		return CopyOfRemove(rList);
+	}
 	// copy the content from the given list
 	inline cList&	operator=(const cList& rList)
 	{
@@ -184,16 +214,14 @@ public:
 		if (bForceResize || _vectorSize < rList._vectorSize) {
 			_Release();
 			_vectorSize = rList._vectorSize;
-			_vector = (TYPE*) operator new[] (_vectorSize * sizeof(TYPE));
+			_vector = (TYPE*) operator new[] (static_cast<size_t>(_vectorSize) * sizeof(TYPE));
 			_ArrayCopyConstruct(_vector, rList._vector, rList._size);
+		} else if (_size >= rList._size) {
+			_ArrayDestruct(_vector+rList._size, _size-rList._size);
+			_ArrayCopyRestrict(_vector, rList._vector, rList._size);
 		} else {
-			if (_size >= rList._size) {
-				_ArrayDestruct(_vector+rList._size, _size-rList._size);
-				_ArrayCopyRestrict(_vector, rList._vector, rList._size);
-			} else {
-				_ArrayCopyRestrict(_vector, rList._vector, _size);
-				_ArrayCopyConstruct(_vector+_size, rList._vector+_size, rList._size-_size);
-			}
+			_ArrayCopyRestrict(_vector, rList._vector, _size);
+			_ArrayCopyConstruct(_vector+_size, rList._vector+_size, rList._size-_size);
 		}
 		_size = rList._size;
 		return *this;
@@ -206,16 +234,14 @@ public:
 		if (bForceResize || _vectorSize < nSize) {
 			_Release();
 			_vectorSize = nSize;
-			_vector = (TYPE*) operator new[] (_vectorSize * sizeof(TYPE));
+			_vector = (TYPE*) operator new[] (static_cast<size_t>(_vectorSize) * sizeof(TYPE));
 			_ArrayCopyConstruct(_vector, pData, nSize);
+		} else if (_size >= nSize) {
+			_ArrayDestruct(_vector+nSize, _size-nSize);
+			_ArrayCopyRestrict(_vector, pData, nSize);
 		} else {
-			if (_size >= nSize) {
-				_ArrayDestruct(_vector+nSize, _size-nSize);
-				_ArrayCopyRestrict(_vector, pData, nSize);
-			} else {
-				_ArrayCopyRestrict(_vector, pData, _size);
-				_ArrayCopyConstruct(_vector+_size, pData+_size, nSize-_size);
-			}
+			_ArrayCopyRestrict(_vector, pData, _size);
+			_ArrayCopyConstruct(_vector+_size, pData+_size, nSize-_size);
 		}
 		_size = nSize;
 		return *this;
@@ -230,8 +256,7 @@ public:
 		_size = rList._size;
 		_vectorSize = rList._vectorSize;
 		_vector = rList._vector;
-		rList._vector = NULL;
-		rList._size = rList._vectorSize = 0;
+		rList._Init();
 		return *this;
 	}
 
@@ -304,7 +329,7 @@ public:
 		_vector[idx1] = _vector[idx2];
 		_vector[idx2] = tmp;
 	}
-	
+
 	inline bool		operator==(const cList& rList) const {
 		if (_size != rList._size)
 			return false;
@@ -317,7 +342,7 @@ public:
 	// Set the allocated memory (normally used for types without constructor).
 	inline void		Memset(uint8_t val)
 	{
-		memset(_vector, val, _size * sizeof(TYPE));
+		memset(_vector, val, static_cast<size_t>(_size) * sizeof(TYPE));
 	}
 	inline void		MemsetValue(ARG_TYPE val)
 	{
@@ -335,7 +360,7 @@ public:
 			_vector = NULL;
 			return;
 		}
-		_vector = (TYPE*) operator new[] (newSize * sizeof(TYPE));
+		_vector = (TYPE*) operator new[] (static_cast<size_t>(newSize) * sizeof(TYPE));
 		_ArrayConstruct(_vector, newSize);
 	}
 
@@ -407,7 +432,11 @@ public:
 	}
 	inline size_t	GetDataSize() const
 	{
-		return sizeof(TYPE)*_size;
+		return sizeof(TYPE)*static_cast<size_t>(_size);
+	}
+	inline size_t	GetMemorySize() const
+	{
+		return sizeof(cList)+sizeof(TYPE)*static_cast<size_t>(_vectorSize);
 	}
 
 	inline TYPE*	Begin() const
@@ -677,7 +706,7 @@ public:
 		return (static_cast<RTYPE>(*nth1) + static_cast<RTYPE>(*nth)) / RTYPE(2);
 	}
 
-	inline TYPE		GetMean()
+	inline TYPE		GetMean() const
 	{
 		return std::accumulate(Begin(), End(), TYPE(0)) / _size;
 	}
@@ -1154,6 +1183,17 @@ public:
 		}
 	}
 
+	// remove duplicated values; the values are expected to be sorted, set bSort if not
+	template <bool bSort=true>
+	inline void		RemoveDuplicates()
+	{
+		if (bSort)
+			Sort();
+		const IDX index(std::unique(Begin(), End()) - Begin());
+		if (index < _size)
+			RemoveLast(_size-index);
+	}
+
 	inline void		RemoveAtMove(IDX index)
 	{
 		ASSERT(index < _size);
@@ -1257,12 +1297,17 @@ protected:
 	{
 		ASSERT(newVectorSize > _vectorSize);
 		// grow by 50% or at least to minNewVectorSize
-		const IDX expoVectorSize(_vectorSize + (_vectorSize>>1));
+		IDX expoVectorSize(_vectorSize + (_vectorSize>>1));
+		// cap growth for very large vectors
+		const size_t maxGrowCapacity(3*1024*1024*1024ull/*3GB*/);
+		const size_t growCapacity(static_cast<size_t>(expoVectorSize - _vectorSize) * sizeof(TYPE));
+		if (growCapacity > maxGrowCapacity)
+			expoVectorSize = _vectorSize + static_cast<IDX>(maxGrowCapacity / sizeof(TYPE));
+		// allocate a larger chunk of memory, copy the data and delete the old chunk
 		if (newVectorSize < expoVectorSize)
 			newVectorSize = expoVectorSize;
-		// allocate a larger chunk of memory, copy the data and delete the old chunk
 		TYPE* const tmp(_vector);
-		_vector = (TYPE*) operator new[] (newVectorSize * sizeof(TYPE));
+		_vector = (TYPE*) operator new[] (static_cast<size_t>(newVectorSize) * sizeof(TYPE));
 		_ArrayMoveConstruct<true>(_vector, tmp, _size);
 		_vectorSize = newVectorSize;
 		operator delete[] (tmp);
@@ -1284,7 +1329,7 @@ protected:
 			_vector = NULL;
 		} else {
 			TYPE* const tmp(_vector);
-			_vector = (TYPE*) operator new[] (_vectorSize * sizeof(TYPE));
+			_vector = (TYPE*) operator new[] (static_cast<size_t>(_vectorSize) * sizeof(TYPE));
 			_ArrayMoveConstruct<true>(_vector, tmp, _vectorSize);
 			operator delete[] (tmp);
 		}
@@ -1296,6 +1341,16 @@ protected:
 		if (useConstruct) {
 			while (n--)
 				new(dst+n) TYPE;
+		}
+	}
+	static inline void	_ArrayConstruct(TYPE* RESTRICT dst, IDX n, const Type& value)
+	{
+		if (useConstruct) {
+			while (n--)
+				new(dst+n) TYPE(value);
+		} else {
+			while (n--)
+				dst[n] = value;
 		}
 	}
 	static inline void	_ArrayCopyConstruct(TYPE* RESTRICT dst, const TYPE* RESTRICT src, IDX n)
@@ -1319,7 +1374,7 @@ protected:
 	{
 		if (useConstruct) {
 			while (n--)
-				dst[n] = src[n];
+				dst[n] = std::move(src[n]);
 		} else {
 			memcpy((void*)dst, (const void*)src, n*sizeof(TYPE));
 		}
@@ -1329,7 +1384,7 @@ protected:
 		ASSERT(dst != src);
 		if (useConstruct > 1) {
 			for (IDX i=0; i<n; ++i) {
-				new(dst+i) TYPE(src[i]);
+				new(dst+i) TYPE(std::move(src[i]));
 				(src+i)->~TYPE();
 			}
 		} else {
@@ -1342,11 +1397,11 @@ protected:
 		ASSERT(dst != src);
 		if (useConstruct > 1) {
 			while (n--) {
-				new(dst+n) TYPE(src[n]);
+				new(dst+n) TYPE(std::move(src[n]));
 				(src+n)->~TYPE();
 			}
 		} else {
-			const size_t _size(sizeof(TYPE)*n);
+			const size_t _size(sizeof(TYPE)*static_cast<size_t>(n));
 			if (bRestrict)
 				memcpy((void*)dst, (const void*)src, _size);
 			else
@@ -1359,11 +1414,11 @@ protected:
 		ASSERT(dst != src);
 		if (useConstruct > 1) {
 			while (n--) {
-				dst[n] = src[n];
+				dst[n] = std::move(src[n]);
 				(src+n)->~TYPE();
 			}
 		} else {
-			const size_t _size(sizeof(TYPE)*n);
+			const size_t _size(sizeof(TYPE)*static_cast<size_t>(n));
 			if (useConstruct == 1)
 				while (n--)
 					(dst+n)->~TYPE();
@@ -1393,7 +1448,7 @@ public:
 	typedef std::vector<Type> VectorType;
 	inline cList(const VectorType& rList) { CopyOf(&rList[0], rList.size()); }
 	#ifdef _SUPPORT_CPP11
-	inline cList(std::initializer_list<Type> l) : _size(0), _vectorSize((size_type)l.size()), _vector(NULL) { ASSERT(l.size()<NO_INDEX); if (_vectorSize == 0) return; _vector = (Type*) operator new[] (_vectorSize*sizeof(Type)); const Type* first(l.begin()); do new(_vector + _size++) Type(*first++); while (first!=l.end()); }
+	inline cList(std::initializer_list<Type> l) : _size(0), _vectorSize((size_type)l.size()), _vector(NULL) { ASSERT(l.size()<NO_INDEX); if (_vectorSize == 0) return; _vector = (Type*) operator new[] (static_cast<size_t>(_vectorSize)*sizeof(Type)); const Type* first(l.begin()); do new(_vector + _size++) Type(*first++); while (first!=l.end()); }
 	#endif
 	inline bool empty() const { return IsEmpty(); }
 	inline size_type size() const { return GetSize(); }
@@ -1405,6 +1460,7 @@ public:
 	inline reference emplace_back(Args&&... args) { return AddConstruct(std::forward<Args>(args)...); }
 	inline void push_back(value_type&& elem) { AddConstruct(elem); }
 	#endif
+	inline void assign(size_type count, const Type& value) { Empty(); Reserve(count); _ArrayConstruct(_vector, count, value); _size = count; }
 	inline void push_back(const_reference elem) { Insert(elem); }
 	inline void pop_back() { RemoveLast(); }
 	inline void reserve(size_type newSize) { Reserve(newSize); }

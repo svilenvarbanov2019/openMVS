@@ -15,6 +15,16 @@
 
 // D E F I N E S ///////////////////////////////////////////////////
 
+// Helper macros for stringification
+#define STRINGIFY(x) #x
+#define TOSTRING(x) STRINGIFY(x)
+
+#define OpenMVS_VERSION TOSTRING(OpenMVS_MAJOR_VERSION) "." TOSTRING(OpenMVS_MINOR_VERSION) "." TOSTRING(OpenMVS_PATCH_VERSION)
+
+#define OpenMVS_VERSION_AT_LEAST(x,y,z) \
+	(OpenMVS_MAJOR_VERSION>x || (OpenMVS_MAJOR_VERSION==x && \
+	(OpenMVS_MINOR_VERSION>y || (OpenMVS_MINOR_VERSION==y && OpenMVS_PATCH_VERSION>=z))))
+
 #ifdef _MSC_VER
 
 // Modify the following defines if you have to target a platform prior to the ones specified below.
@@ -92,11 +102,11 @@
 /*----------------------------------------------------------------*/
 #ifdef _USRDLL
   #ifdef Common_EXPORTS
-    #define GENERAL_API EXPORT_API
-    #define GENERAL_TPL
+	#define GENERAL_API EXPORT_API
+	#define GENERAL_TPL
   #else
-    #define GENERAL_API IMPORT_API
-    #define GENERAL_TPL extern
+	#define GENERAL_API IMPORT_API
+	#define GENERAL_TPL extern
   #endif
 #else
   #define GENERAL_API
@@ -126,7 +136,7 @@
 #define GENERAL_TPL
 
 // Define platform type
-#if __x86_64__ || __ppc64__
+#if defined(__x86_64__) || defined(__ppc64__) || defined(__aarch64__) || defined(__arm64__) || defined(__mips64)
 #define _ENVIRONMENT64
 #else
 #define _ENVIRONMENT32
@@ -147,6 +157,9 @@
 #if __cplusplus >= 202002L || __clang_major__ >= 10
 #define _SUPPORT_CPP20
 #endif
+#if __cplusplus >= 202302L || __clang_major__ >= 16
+#define _SUPPORT_CPP23
+#endif
 
 
 #if defined(__powerpc__)
@@ -163,8 +176,7 @@
 #endif
 
 
-
-//optimization flags
+// optimization flags
 #if defined(_MSC_VER)
 #	define ALIGN(n) __declspec(align(n))
 #	define NOINITVTABLE __declspec(novtable) //disable generating code to initialize the vfptr in the constructor(s) and destructor of the class
@@ -178,7 +190,7 @@
 #	define COLD
 #	define THREADLOCAL __declspec(thread)
 #	define FORCEINLINE __forceinline
-#elif defined(__GNUC__)
+#elif defined(__GNUC__) || defined(__clang__)
 #	define ALIGN(n) __attribute__((aligned(n)))
 #	define NOINITVTABLE
 #	define DECRESTRICT
@@ -206,9 +218,6 @@
 #	define FORCEINLINE inline
 #endif
 
-#ifndef _SUPPORT_CPP11
-#	define constexpr inline
-#endif
 #ifdef _SUPPORT_CPP17
 #	undef MAYBEUNUSED
 #	define MAYBEUNUSED [[maybe_unused]]
@@ -220,41 +229,71 @@
 #define SAFE_RELEASE(p)		{ if (p!=NULL) { (p)->Release(); (p)=NULL; } }
 
 
+#ifdef _MSC_VER
+#	define DEBUG_BREAK __debugbreak
+#else
+#if defined(__has_builtin) && __has_builtin(__builtin_debugtrap)
+#	define DEBUG_BREAK __builtin_debugtrap
+#else
+# if defined(__i386__) || defined(__x86_64__)
+__inline__ static void trap_instruction() { __asm__ volatile("int $3"); }
+#	define DEBUG_BREAK trap_instruction
+# elif defined(__arm__)
+__attribute__((always_inline))
+__inline__ static void trap_instruction() { __asm__ volatile("bkpt #0"); }
+#	define DEBUG_BREAK trap_instruction
+# elif defined(__aarch64__)
+__attribute__((always_inline))
+__inline__ static void trap_instruction() { __asm__ volatile("brk #0"); }
+#	define DEBUG_BREAK trap_instruction
+# else
+#	define DEBUG_BREAK __builtin_trap
+# endif
+#endif
+#endif
+
+#define PRINT_ASSERT_MSG(exp, ...)
+
 #ifdef _DEBUG
 
 #ifdef _MSC_VER
 #define _DEBUGINFO
-#define _CRTDBG_MAP_ALLOC	//enable this to show also the filename (DEBUG_NEW should also be defined in each file)
+#define _CRTDBG_MAP_ALLOC //enable this to show also the filename (DEBUG_NEW should also be defined in each file)
 #include <cstdlib>
 #include <crtdbg.h>
 #ifdef _INC_CRTDBG
-#define ASSERT(exp)	{if (!(exp) && 1 == _CrtDbgReport(_CRT_ASSERT, __FILE__, __LINE__, NULL, #exp)) _CrtDbgBreak();}
+#define SIMPLE_ASSERT(exp) {if (!(exp) && 1 == _CrtDbgReport(_CRT_ASSERT, __FILE__, __LINE__, NULL, #exp)) _CrtDbgBreak();}
+#define ASSERT(exp, ...) {static bool bIgnore(false); if (!bIgnore && !(exp)) {PRINT_ASSERT_MSG(exp, ##__VA_ARGS__); if (!(bIgnore = !(1 == _CrtDbgReport(_CRT_ASSERT, __FILE__, __LINE__, NULL, #exp)))) _CrtDbgBreak();}}
 #else
-#define ASSERT(exp)	{if (!(exp)) __debugbreak();}
+#define SIMPLE_ASSERT(exp) {if (!(exp)) DEBUG_BREAK();}
+#define ASSERT(exp, ...) {if (!(exp)) {PRINT_ASSERT_MSG(exp, ##__VA_ARGS__); DEBUG_BREAK();}}
 #endif // _INC_CRTDBG
-#define TRACE(...) {TCHAR buffer[2048];	_sntprintf(buffer, 2048, __VA_ARGS__); OutputDebugString(buffer);}
+#define TRACE(...) {TCHAR buffer[2048]; _sntprintf(buffer, 2048, __VA_ARGS__); OutputDebugString(buffer);}
 #else // _MSC_VER
 #include <assert.h>
-#define ASSERT(exp)	assert(exp)
+#define SIMPLE_ASSERT(exp) {if (!(exp)) DEBUG_BREAK();}
+#define ASSERT(exp, ...) {if (!(exp)) {PRINT_ASSERT_MSG(exp, ##__VA_ARGS__); DEBUG_BREAK();}}
 #define TRACE(...)
 #endif // _MSC_VER
 
 #else
 
 #ifdef _RELEASE
-#define ASSERT(exp)
+#define SIMPLE_ASSERT(exp)
+#define ASSERT(exp, ...)
 #else
 #ifdef _MSC_VER
-#define ASSERT(exp) {if (!(exp)) __debugbreak();}
+#define SIMPLE_ASSERT(exp) {if (!(exp)) __debugbreak();}
+#define ASSERT(exp, ...) {if (!(exp)) {PRINT_ASSERT_MSG(exp, ##__VA_ARGS__); __debugbreak();}}
 #else // _MSC_VER
-#define ASSERT(exp) {if (!(exp)) __builtin_trap();}
+#define SIMPLE_ASSERT(exp) {if (!(exp)) __builtin_trap();}
+#define ASSERT(exp, ...) {if (!(exp)) {PRINT_ASSERT_MSG(exp, ##__VA_ARGS__); __builtin_trap();}}
 #endif // _MSC_VER
 #endif
 #define TRACE(...)
 
 #endif // _DEBUG
 
-#define ASSERTM(exp, msg) ASSERT(exp)
 
 namespace SEACAVE_ASSERT
 {

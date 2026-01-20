@@ -45,7 +45,9 @@ namespace MVS {
 // Forward declarations
 class MVS_API Scene;
 #ifdef _USE_CUDA
-class PatchMatchCUDA;
+namespace CUDA {
+class PatchMatch;
+} // namespace CUDA
 #endif // _USE_CUDA
 
 // structure used to compute all depth-maps
@@ -55,7 +57,6 @@ public:
 	DepthMapsData(Scene& _scene);
 	~DepthMapsData();
 
-	bool SelectViews(IIndexArr& images, IIndexArr& imagesMap, IIndexArr& neighborsMap);
 	bool SelectViews(DepthData& depthData);
 	bool InitViews(DepthData& depthData, IIndex idxNeighbor, IIndex numNeighbors, bool loadImages, int loadDepthMaps);
 	bool InitDepthMap(DepthData& depthData);
@@ -64,9 +65,13 @@ public:
 	bool RemoveSmallSegments(DepthData& depthData);
 	bool GapInterpolation(DepthData& depthData);
 
-	bool FilterDepthMap(DepthData& depthData, const IIndexArr& idxNeighbors, bool bAdjust=true);
+	void EstimateNormalMaps();
+
+	bool AdjustConfidenceFast(DepthData& depthData, const IIndexArr& idxNeighbors);
+	bool AdjustConfidence(DepthData& depthDataRef, const IIndexArr& idxNeighbors);
 	void MergeDepthMaps(PointCloud& pointcloud, bool bEstimateColor, bool bEstimateNormal);
 	void FuseDepthMaps(PointCloud& pointcloud, bool bEstimateColor, bool bEstimateNormal);
+	void DenseFuseDepthMaps(PointCloud& pointcloud, bool bEstimateColor, bool bEstimateNormal);
 
 	static DepthData ScaleDepthData(const DepthData& inputDeptData, float scale);
 
@@ -88,7 +93,7 @@ public:
 
 	#ifdef _USE_CUDA
 	// used internally to estimate the depth-maps using CUDA
-	CAutoPtr<PatchMatchCUDA> pmCUDA;
+	CAutoPtr<MVS::CUDA::PatchMatch> pmCUDA;
 	#endif // _USE_CUDA
 };
 /*----------------------------------------------------------------*/
@@ -104,9 +109,10 @@ struct MVS_API DenseDepthMapData {
 	CAutoPtr<Util::Progress> progress;
 	int nEstimationGeometricIter;
 	int nFusionMode;
+	float fSampleMeshNeighbors;
 	STEREO::SemiGlobalMatcher sgm;
 
-	DenseDepthMapData(Scene& _scene, int _nFusionMode=0);
+	DenseDepthMapData(Scene& _scene, int _nFusionMode=0, float _fSampleMeshNeighbors=0);
 	~DenseDepthMapData();
 
 	void SignalCompleteDepthmapFilter();

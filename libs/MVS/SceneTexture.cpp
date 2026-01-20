@@ -62,71 +62,28 @@ using namespace MVS;
 
 // method used to find optimal view per face
 #define TEXOPT_INFERENCE_LBP 1
-#define TEXOPT_INFERENCE_TRWS 2
 #define TEXOPT_INFERENCE TEXOPT_INFERENCE_LBP
 
 // inference algorithm
 #if TEXOPT_INFERENCE == TEXOPT_INFERENCE_LBP
 #include "../Math/LBP.h"
 namespace MVS {
-typedef LBPInference::NodeID NodeID;
+constexpr LBPInference::EnergyType LBPMaxEnergy(1);
 // Potts model as smoothness function
 LBPInference::EnergyType STCALL SmoothnessPotts(LBPInference::NodeID, LBPInference::NodeID, LBPInference::LabelID l1, LBPInference::LabelID l2) {
-	return l1 == l2 && l1 != 0 && l2 != 0 ? LBPInference::EnergyType(0) : LBPInference::EnergyType(LBPInference::MaxEnergy);
+	return l1 == l2 && l1 != 0 && l2 != 0 ? LBPInference::EnergyType(0) : LBPMaxEnergy;
 }
 }
 #endif
-#if TEXOPT_INFERENCE == TEXOPT_INFERENCE_TRWS
-#include "../Math/TRWS/MRFEnergy.h"
-namespace MVS {
-// TRWS MRF energy using Potts model
-typedef unsigned NodeID;
-typedef unsigned LabelID;
-typedef TypePotts::REAL EnergyType;
-static const EnergyType MaxEnergy(1);
-struct TRWSInference {
-	typedef MRFEnergy<TypePotts> MRFEnergyType;
-	typedef MRFEnergy<TypePotts>::Options MRFOptions;
 
-	CAutoPtr<MRFEnergyType> mrf;
-	CAutoPtrArr<MRFEnergyType::NodeId> nodes;
-
-	inline TRWSInference() {}
-	void Init(NodeID nNodes, LabelID nLabels) {
-		mrf = new MRFEnergyType(TypePotts::GlobalSize(nLabels));
-		nodes = new MRFEnergyType::NodeId[nNodes];
-	}
-	inline bool IsEmpty() const {
-		return mrf == NULL;
-	}
-	inline void AddNode(NodeID n, const EnergyType* D) {
-		nodes[n] = mrf->AddNode(TypePotts::LocalSize(), TypePotts::NodeData(D));
-	}
-	inline void AddEdge(NodeID n1, NodeID n2) {
-		mrf->AddEdge(nodes[n1], nodes[n2], TypePotts::EdgeData(MaxEnergy));
-	}
-	EnergyType Optimize() {
-		MRFOptions options;
-		options.m_eps = 0.005;
-		options.m_iterMax = 1000;
-		#if 1
-		EnergyType lowerBound, energy;
-		mrf->Minimize_TRW_S(options, lowerBound, energy);
-		#else
-		EnergyType energy;
-		mrf->Minimize_BP(options, energy);
-		#endif
-		return energy;
-	}
-	inline LabelID GetLabel(NodeID n) const {
-		return mrf->GetSolution(nodes[n]);
-	}
-};
-}
-#endif
+#pragma push_macro("VERBOSE")
+#undef VERBOSE
+#define VERBOSE(...) LOG(lt, __VA_ARGS__)
 
 
 // S T R U C T S ///////////////////////////////////////////////////
+
+DEFINE_LOG_NAME(lt, _T("ScnTextr"));
 
 typedef Mesh::Vertex Vertex;
 typedef Mesh::VIndex VIndex;
@@ -161,9 +118,9 @@ struct MeshTexture {
 			Base::Clear();
 			faceMap.memset((uint8_t)NO_ID);
 		}
-		void Raster(const ImageRef& pt, const Point3f& bary) {
-			const Point3f pbary(PerspectiveCorrectBarycentricCoordinates(bary));
-			const Depth z(ComputeDepth(pbary));
+		void Raster(const ImageRef& pt, const Triangle& t, const Point3f& bary) {
+			const Point3f pbary(PerspectiveCorrectBarycentricCoordinates(t, bary));
+			const Depth z(ComputeDepth(t, pbary));
 			ASSERT(z > Depth(0));
 			Depth& depth = depthMap(pt);
 			if (depth == 0 || depth > z) {
@@ -458,9 +415,9 @@ MeshTexture::~MeshTexture()
 void MeshTexture::ListVertexFaces()
 {
 	scene.mesh.EmptyExtra();
-	scene.mesh.ListIncidenteFaces();
+	scene.mesh.ListIncidentFaces();
 	scene.mesh.ListBoundaryVertices();
-	scene.mesh.ListIncidenteFaceFaces();
+	scene.mesh.ListIncidentFaceFaces();
 }
 
 // extract array of faces viewed by each image
@@ -545,16 +502,18 @@ bool MeshTexture::ListCameraFaces(FaceDataViewArr& facesDatas, float fOutlierThr
 		faceMap.create(imageData.GetSize());
 		depthMap.create(imageData.GetSize());
 		RasterMesh rasterer(vertices, imageData.camera, depthMap, faceMap);
+		RasterMesh::Triangle triangle;
+		RasterMesh::TriangleRasterizer triangleRasterizer(triangle, rasterer);
 		if (nIgnoreMaskLabel >= 0) {
 			// import mask
 			BitMatrix bmask;
-			DepthEstimator::ImportIgnoreMask(imageData, imageData.GetSize(), (uint16_t)OPTDENSE::nIgnoreMaskLabel, bmask, &rasterer.mask);
+			DepthEstimator::ImportIgnoreMask(imageData, imageData.GetSize(), (uint8_t)OPTDENSE::nIgnoreMaskLabel, bmask, &rasterer.mask);
 		} else if (nIgnoreMaskLabel == -1) {
 			// creating mask to discard invalid regions created during image radial undistortion
 			rasterer.mask = DetectInvalidImageRegions(imageData.image);
 			#if TD_VERBOSE != TD_VERBOSE_OFF
-			if (VERBOSITY_LEVEL > 2)
-				cv::imwrite(String::FormatString("umask%04d.png", idxView), rasterer.mask);
+			if (VERBOSITY_LEVEL > 3)
+				SaveImage(rasterer.mask, String::FormatString("umask%04d.png", idxView));
 			#endif
 		}
 		rasterer.Clear();
@@ -562,9 +521,9 @@ bool MeshTexture::ListCameraFaces(FaceDataViewArr& facesDatas, float fOutlierThr
 			rasterer.validFace = true;
 			const Face& facet = faces[idxFace];
 			rasterer.idxFace = idxFace;
-			rasterer.Project(facet);
+			rasterer.Project(facet, triangleRasterizer);
 			if (!rasterer.validFace)
-				rasterer.Project(facet);
+				rasterer.Project(facet, triangleRasterizer);
 		}
 		// compute the projection area of visible faces
 		#if TEXOPT_FACEOUTLIER != TEXOPT_FACEOUTLIER_NA
@@ -728,7 +687,7 @@ IIndexArr MeshTexture::SelectBestView(const FaceDataArr& faceDatas, FIndex fid, 
 	});
 	
 	#endif
-	IIndexArr cameras(MIN(minCommonCameras, faceDatas.size()));
+	IIndexArr cameras(MINF(minCommonCameras, faceDatas.size()));
 	FOREACH(i, cameras)
 		cameras[i] = faceDatas[scorePodium[i]].idxView;
 	return cameras;
@@ -1125,7 +1084,7 @@ bool MeshTexture::FaceViewSelection(unsigned minCommonCameras, float fOutlierThr
 
 				#if TEXOPT_INFERENCE == TEXOPT_INFERENCE_LBP
 				// initialize inference structures
-				const LBPInference::EnergyType MaxEnergy(fRatioDataSmoothness*(LBPInference::EnergyType)LBPInference::MaxEnergy);
+				const LBPInference::EnergyType MaxEnergy(fRatioDataSmoothness*LBPMaxEnergy);
 				LBPInference inference; {
 					inference.SetNumNodes(virtualFaces.size());
 					inference.SetSmoothCost(SmoothnessPotts);
@@ -1137,14 +1096,17 @@ bool MeshTexture::FaceViewSelection(unsigned minCommonCameras, float fOutlierThr
 							if (f < fAdj) // add edges only once
 								inference.SetNeighbors(f, fAdj);
 						}
-						// set costs for label 0 (undefined)
-						inference.SetDataCost((Label)0, f, MaxEnergy);
 					}
 				}
 
 				// set data costs for all labels (except label 0 - undefined)
 				FOREACH(f, virtualFacesDatas) {
 					const FaceDataArr& faceDatas = virtualFacesDatas[f];
+					if (faceDatas.empty()) {
+						// set costs for label 0 (undefined)
+						inference.SetDataCost(Label(0), f, MaxEnergy);
+						continue;
+					}
 					for (const FaceData& faceData: faceDatas) {
 						const Label label((Label)faceData.idxView+1);
 						const float normalizedQuality(faceData.quality>=normQuality ? 1.f : faceData.quality/normQuality);
@@ -1219,7 +1181,7 @@ bool MeshTexture::FaceViewSelection(unsigned minCommonCameras, float fOutlierThr
 
 				#if TEXOPT_INFERENCE == TEXOPT_INFERENCE_LBP
 				// initialize inference structures
-				const LBPInference::EnergyType MaxEnergy(fRatioDataSmoothness*(LBPInference::EnergyType)LBPInference::MaxEnergy);
+				const LBPInference::EnergyType MaxEnergy(fRatioDataSmoothness*LBPMaxEnergy);
 				LBPInference inference; {
 					inference.SetNumNodes(faces.size());
 					inference.SetSmoothCost(SmoothnessPotts);
@@ -1231,14 +1193,17 @@ bool MeshTexture::FaceViewSelection(unsigned minCommonCameras, float fOutlierThr
 							if (f < fAdj) // add edges only once
 								inference.SetNeighbors(f, fAdj);
 						}
-						// set costs for label 0 (undefined)
-						inference.SetDataCost((Label)0, f, MaxEnergy);
 					}
 				}
 
 				// set data costs for all labels (except label 0 - undefined)
 				FOREACH(f, facesDatas) {
 					const FaceDataArr& faceDatas = facesDatas[f];
+					if (faceDatas.empty()) {
+						// set costs for label 0 (undefined)
+						inference.SetDataCost(Label(0), f, MaxEnergy);
+						continue;
+					}
 					for (const FaceData& faceData: faceDatas) {
 						const Label label((Label)faceData.idxView+1);
 						const float normalizedQuality(faceData.quality>=normQuality ? 1.f : faceData.quality/normQuality);
@@ -1258,92 +1223,6 @@ bool MeshTexture::FaceViewSelection(unsigned minCommonCameras, float fOutlierThr
 					ASSERT(label < images.size()+1);
 					if (label > 0)
 						labels[l] = label-1;
-				}
-				#endif
-
-				#if TEXOPT_INFERENCE == TEXOPT_INFERENCE_TRWS
-				// find connected components
-				ASSERT((FIndex)boost::num_vertices(graph) == faces.size());
-				components.resize(faces.size());
-				const FIndex nComponents(boost::connected_components(graph, components.data()));
-
-				// map face ID from global to component space
-				typedef cList<NodeID, NodeID, 0, 128, NodeID> NodeIDs;
-				NodeIDs nodeIDs(faces.size());
-				NodeIDs sizes(nComponents);
-				sizes.Memset(0);
-				FOREACH(c, components)
-					nodeIDs[c] = sizes[components[c]]++;
-
-				// initialize inference structures
-				const LabelID numLabels(images.size()+1);
-				CLISTDEFIDX(TRWSInference, FIndex) inferences(nComponents);
-				FOREACH(s, sizes) {
-					const NodeID numNodes(sizes[s]);
-					ASSERT(numNodes > 0);
-					if (numNodes <= 1)
-						continue;
-					TRWSInference& inference = inferences[s];
-					inference.Init(numNodes, numLabels);
-				}
-
-				// set data costs
-				{
-					// add nodes
-					CLISTDEF0(EnergyType) D(numLabels);
-					FOREACH(f, facesDatas) {
-						TRWSInference& inference = inferences[components[f]];
-						if (inference.IsEmpty())
-							continue;
-						D.MemsetValue(MaxEnergy);
-						const FaceDataArr& faceDatas = facesDatas[f];
-						for (const FaceData& faceData: faceDatas) {
-							const Label label((Label)faceData.idxView);
-							const float normalizedQuality(faceData.quality>=normQuality ? 1.f : faceData.quality/normQuality);
-							const EnergyType dataCost(MaxEnergy*(1.f-normalizedQuality));
-							D[label] = dataCost;
-						}
-						const NodeID nodeID(nodeIDs[f]);
-						inference.AddNode(nodeID, D.Begin());
-					}
-					// add edges
-					EdgeOutIter ei, eie;
-					FOREACH(f, faces) {
-						TRWSInference& inference = inferences[components[f]];
-						if (inference.IsEmpty())
-							continue;
-						for (boost::tie(ei, eie) = boost::out_edges(f, graph); ei != eie; ++ei) {
-							ASSERT(f == (FIndex)ei->m_source);
-							const FIndex fAdj((FIndex)ei->m_target);
-							ASSERT(components[f] == components[fAdj]);
-							if (f < fAdj) // add edges only once
-								inference.AddEdge(nodeIDs[f], nodeIDs[fAdj]);
-						}
-					}
-				}
-
-				// assign the optimal view (label) to each face
-				#ifdef TEXOPT_USE_OPENMP
-				#pragma omp parallel for schedule(dynamic)
-				for (int i=0; i<(int)inferences.size(); ++i) {
-				#else
-				FOREACH(i, inferences) {
-				#endif
-					TRWSInference& inference = inferences[i];
-					if (inference.IsEmpty())
-						continue;
-					inference.Optimize();
-				}
-				// extract resulting labeling
-				labels.Memset(0xFF);
-				FOREACH(l, labels) {
-					TRWSInference& inference = inferences[components[l]];
-					if (inference.IsEmpty())
-						continue;
-					const Label label(inference.GetLabel(nodeIDs[l]));
-					ASSERT(label >= 0 && label < numLabels);
-					if (label < images.size())
-						labels[l] = label;
 				}
 				#endif
 			}
@@ -1795,7 +1674,7 @@ void MeshTexture::ProcessMask(Image8U& mask, int stripWidth)
 	// compute the set of valid pixels at the border of the texture patch
 	#define ISEMPTY(mask, x,y) (mask(y,x) == empty)
 	const int width(mask.width()), height(mask.height());
-	typedef std::unordered_set<ImageRef> PixelSet;
+	typedef std::unordered_set<ImageRef,std::hash<ImageRef::Base>> PixelSet;
 	PixelSet borderPixels;
 	for (int y=0; y<height; ++y) {
 		for (int x=0; x<width; ++x) {
@@ -2058,7 +1937,7 @@ void MeshTexture::LocalSeamLeveling()
 						inline RasterPatch(Image32F3& _image, Image8U& _mask, const Image32F3& _image0, const Image8U3& _image1,
 							const TexCoord& _p0, const TexCoord& _p0Adj, const TexCoord& _p1, const TexCoord& _p1Adj)
 							: image(_image), mask(_mask), image0(_image0), image1(_image1),
-							p0(_p0), p0Dir(_p0Adj-_p0), p1(_p1), p1Dir(_p1Adj-_p1), length((float)norm(p0Dir)), sampler() {}
+							p0(_p0), p0Dir(_p0Adj-_p0), p1(_p1), p1Dir(_p1Adj-_p1), length((float)norm(p0Dir)) {}
 						inline void operator()(const ImageRef& pt) {
 							const float l((float)norm(TexCoord(pt)-p0)/length);
 							// compute mean color
@@ -2263,7 +2142,7 @@ void MeshTexture::GenerateTexture(bool bGlobalSeamLeveling, bool bLocalSeamLevel
 					// try again with a bigger texture
 					textureSize *= 2;
 					if (maxTextureSize > 0)
-						textureSize = std::max(textureSize, maxTextureSize);
+						textureSize = MAXF(textureSize, maxTextureSize);
 					unplacedRects.JoinRemove(newPlacedRects);
 				}
 			}
@@ -2339,7 +2218,7 @@ bool Scene::TextureMesh(unsigned nResolutionLevel, unsigned nMinResolution, unsi
 		TD_TIMER_STARTD();
 		if (!texture.FaceViewSelection(minCommonCameras, fOutlierThreshold, fRatioDataSmoothness, nIgnoreMaskLabel, views))
 			return false;
-		DEBUG_EXTRA("Assigning the best view to each face completed: %u faces (%s)", mesh.faces.size(), TD_TIMER_GET_FMT().c_str());
+		DEBUG_EXTRA("Assigning the best view to each face completed: %u faces, %u patches (%s)", mesh.faces.size(), texture.texturePatches.size(), TD_TIMER_GET_FMT().c_str());
 	}
 
 	// generate the texture image and atlas
@@ -2352,3 +2231,5 @@ bool Scene::TextureMesh(unsigned nResolutionLevel, unsigned nMinResolution, unsi
 	return true;
 } // TextureMesh
 /*----------------------------------------------------------------*/
+
+#pragma pop_macro("VERBOSE")

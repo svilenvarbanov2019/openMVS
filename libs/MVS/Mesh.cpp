@@ -31,21 +31,6 @@
 
 #include "Common.h"
 #include "Mesh.h"
-// fix non-manifold vertices
-#include <boost/graph/adjacency_list.hpp>
-#include <boost/graph/filtered_graph.hpp>
-#include <boost/graph/connected_components.hpp>
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable: 4244 4267 4305)
-#ifdef _SUPPORT_CPP17
-namespace std {
-template <typename ArgumentType, typename ResultType>
-struct unary_function {
-};
-} // namespace std
-#endif // _SUPPORT_CPP17
-#endif // _MSC_VER
 // VCG: mesh reconstruction post-processing
 #define _SILENCE_STDEXT_HASH_DEPRECATION_WARNINGS
 #include <vcg/complex/complex.h>
@@ -98,8 +83,14 @@ using namespace MVS;
 #include <unsupported/Eigen/BVH>
 #endif
 
+#pragma push_macro("VERBOSE")
+#undef VERBOSE
+#define VERBOSE(...) LOG(lt, __VA_ARGS__)
+
 
 // S T R U C T S ///////////////////////////////////////////////////
+
+DEFINE_LOG_NAME(lt, _T("Mesh    "));
 
 // free all memory
 void Mesh::Release()
@@ -110,15 +101,19 @@ void Mesh::Release()
 } // Release
 void Mesh::ReleaseExtra()
 {
+	ReleaseComputable();
 	vertexNormals.Release();
-	vertexVertices.Release();
-	vertexFaces.Release();
-	vertexBoundary.Release();
 	faceNormals.Release();
-	faceFaces.Release();
 	faceTexcoords.Release();
 	texturesDiffuse.Release();
 } // ReleaseExtra
+void Mesh::ReleaseComputable()
+{
+	vertexVertices.Release();
+	vertexFaces.Release();
+	vertexBoundary.Release();
+	faceFaces.Release();
+} // ReleaseComputable
 void Mesh::EmptyExtra()
 {
 	vertexNormals.Empty();
@@ -130,7 +125,7 @@ void Mesh::EmptyExtra()
 	faceTexcoords.Empty();
 	texturesDiffuse.Empty();
 } // EmptyExtra
-void Mesh::Swap(Mesh& rhs)
+Mesh& Mesh::Swap(Mesh& rhs)
 {
 	vertices.Swap(rhs.vertices);
 	faces.Swap(rhs.faces);
@@ -143,18 +138,21 @@ void Mesh::Swap(Mesh& rhs)
 	faceTexcoords.Swap(rhs.faceTexcoords);
 	faceTexindices.Swap(rhs.faceTexindices);
 	std::swap(texturesDiffuse, rhs.texturesDiffuse);
+	return *this;
 } // Swap
 // combine this mesh with the given mesh, without removing duplicate vertices
-void Mesh::Join(const Mesh& mesh)
+Mesh& Mesh::Join(const Mesh& mesh)
 {
 	ASSERT(!HasTexture() && !mesh.HasTexture());
+	if (mesh.IsEmpty())
+		return *this;
 	vertexVertices.Release();
 	vertexFaces.Release();
 	vertexBoundary.Release();
 	faceFaces.Release();
 	if (IsEmpty()) {
 		*this = mesh;
-		return;
+		return *this;
 	}
 	const VIndex offsetV(vertices.size());
 	vertices.Join(mesh.vertices);
@@ -163,6 +161,7 @@ void Mesh::Join(const Mesh& mesh)
 	for (const Face& face: mesh.faces)
 		faces.emplace_back(face.x+offsetV, face.y+offsetV, face.z+offsetV);
 	faceNormals.Join(mesh.faceNormals);
+	return *this;
 }
 /*----------------------------------------------------------------*/
 
@@ -171,7 +170,7 @@ bool Mesh::IsWatertight()
 {
 	if (vertexBoundary.empty()) {
 		if (vertexFaces.empty())
-			ListIncidenteFaces();
+			ListIncidentFaces();
 		ListBoundaryVertices();
 	}
 	for (const bool b : vertexBoundary)
@@ -197,6 +196,47 @@ Mesh::Box Mesh::GetAABB(const Box& bound) const
 			box.InsertFull(X);
 	return box;
 }
+// compute the axis-aligned bounding-box of the mesh
+// considering only vertices within the given percentile range per axis
+Mesh::Box Mesh::GetAABB(float minPercentile, float maxPercentile) const
+{
+	// get percentile bounds for each axis
+	const Box percentileBounds(GetPercentileAABB(minPercentile, maxPercentile));
+	// compute AABB from vertices within percentile bounds
+	return GetAABB(percentileBounds);
+}
+// compute the percentile axis-aligned bounding-box of the mesh
+// considering only vertices within the given percentile range per axis
+Mesh::Box Mesh::GetPercentileAABB(float minPercentile, float maxPercentile) const
+{
+	ASSERT(minPercentile >= 0.f && minPercentile <= 1.f);
+	ASSERT(maxPercentile >= 0.f && maxPercentile <= 1.f);
+	ASSERT(minPercentile < maxPercentile);
+	// collect points per axis
+	typedef CLISTDEF0IDX(Type,VIndex) Scalars;
+	Scalars x, y, z;
+	x.reserve(vertices.size());
+	y.reserve(vertices.size());
+	z.reserve(vertices.size());
+	for (const Vertex& X: vertices) {
+		x.push_back(X.x);
+		y.push_back(X.y);
+		z.push_back(X.z);
+	}
+	if (x.empty())
+		return Box(true);
+	// compute percentile indices
+	x.Sort();
+	y.Sort();
+	z.Sort();
+	const float numPoints(x.size() - 1);
+	const VIndex idxMin(MAXF(VIndex(0), ROUND2INT<VIndex>(minPercentile * numPoints)));
+	const VIndex idxMax(MINF(static_cast<VIndex>(numPoints), ROUND2INT<VIndex>(maxPercentile * numPoints)));
+	// return percentile bounds for each axis
+	return Box(
+		Box::POINT(x[idxMin], y[idxMin], z[idxMin]),
+		Box::POINT(x[idxMax], y[idxMax], z[idxMax]));
+}
 
 // compute the center of the point-cloud as the median
 Mesh::Vertex Mesh::GetCenter() const
@@ -219,7 +259,7 @@ Mesh::Vertex Mesh::GetCenter() const
 
 
 // extract array of vertices incident to each vertex
-void Mesh::ListIncidenteVertices()
+void Mesh::ListIncidentVertices()
 {
 	vertexVertices.clear();
 	vertexVertices.resize(vertices.size());
@@ -237,15 +277,17 @@ void Mesh::ListIncidenteVertices()
 }
 
 // extract the (ordered) array of triangles incident to each vertex
-void Mesh::ListIncidenteFaces()
+void Mesh::ListIncidentFaces()
 {
 	vertexFaces.clear();
 	vertexFaces.resize(vertices.size());
-	FOREACH(i, faces) {
-		const Face& face = faces[i];
+	FOREACH(iF, faces) {
+		const Face& face = faces[iF];
 		for (int v=0; v<3; ++v) {
-			ASSERT(vertexFaces[face[v]].Find(i) == FaceIdxArr::NO_INDEX);
-			vertexFaces[face[v]].emplace_back(i);
+			FaceIdxArr& vfs = vertexFaces[face[v]];
+			ASSERT(vfs.Find(iF) == FaceIdxArr::NO_INDEX || vfs.Find(iF) == vfs.size()-1/*for degenerate faces*/);
+			if (vfs.empty() || vfs.back() != iF)
+				vfs.emplace_back(iF);
 		}
 	}
 }
@@ -254,7 +296,7 @@ void Mesh::ListIncidenteFaces()
 // each triple describes the adjacent face triangles for a given face
 // in the following edge order: v1v2, v2v3, v3v1;
 // NO_ID indicates there is no adjacent face on that edge
-void Mesh::ListIncidenteFaceFaces()
+void Mesh::ListIncidentFaceFaces()
 {
 	ASSERT(vertexFaces.size() == vertices.size());
 	struct inserter_data_t {
@@ -291,7 +333,7 @@ void Mesh::ListIncidenteFaceFaces()
 }
 
 // check each vertex if it is at the boundary or not
-// (make sure you called ListIncidenteFaces() before)
+// (make sure you called ListIncidentFaces() before)
 void Mesh::ListBoundaryVertices()
 {
 	vertexBoundary.clear();
@@ -408,9 +450,9 @@ void Mesh::SmoothNormalFaces(float fMaxGradient, float fOriginalWeight, unsigned
 	if (faceNormals.size() != faces.size())
 		ComputeNormalFaces();
 	if (vertexFaces.size() != vertices.size())
-		ListIncidenteFaces();
+		ListIncidentFaces();
 	if (faceFaces.size() != faces.size())
-		ListIncidenteFaceFaces();
+		ListIncidentFaceFaces();
 	const float cosMaxGradient = COS(FD2R(fMaxGradient));
 	for (unsigned rep = 0; rep < nIterations; ++rep) {
 		NormalArr newFaceNormals(faceNormals.size());
@@ -560,7 +602,7 @@ unsigned Mesh::FixNonManifold(float magDisplacementDuplicateVertices, VertexIdxA
 {
 	ASSERT(!vertices.empty() && !faces.empty());
 	if (vertexFaces.size() != vertices.size())
-		ListIncidenteFaces();
+		ListIncidentFaces();
 	// iterate over all vertices and separates the components
 	// incident to the same vertex by duplicating the vertex
 	unsigned numNonManifoldIssues(0);
@@ -665,7 +707,10 @@ unsigned Mesh::FixNonManifold(float magDisplacementDuplicateVertices, VertexIdxA
 			}
 		}
 	}
-	vertexFaces.Release();
+	if (numNonManifoldIssues > 0) {
+		vertexFaces.Release();
+		DEBUG_ULTIMATE("Removed %u non-manifold issues", numNonManifoldIssues);
+	}
 	return numNonManifoldIssues;
 }
 /*----------------------------------------------------------------*/
@@ -835,26 +880,22 @@ void Mesh::Clean(float fDecimate, float fSpurious, bool bRemoveSpikes, unsigned 
 	// remove spurious components
 	if (fSpurious > 0) {
 		FloatArr edgeLens(0, mesh.EN());
-		for (CLEAN::Mesh::EdgeIterator ei=mesh.edge.begin(); ei!=mesh.edge.end(); ++ei) {
-			const CLEAN::Vertex::CoordType& P0((*ei).V(0)->P());
-			const CLEAN::Vertex::CoordType& P1((*ei).V(1)->P());
-			edgeLens.Insert((P1-P0).Norm());
+		for (CLEAN::Mesh::EdgeType& edge: mesh.edge) {
+			const CLEAN::Vertex::CoordType& P1(edge.V(1)->P());
+			const CLEAN::Vertex::CoordType& P0(edge.V(0)->P());
+			edgeLens.Insert((P1-P0).SquaredNorm());
 		}
-		#if 0
-		const auto ret(ComputeX84Threshold<float,float>(edgeLens.Begin(), edgeLens.size(), 3.f*fSpurious));
-		const float thLongEdge(ret.first+ret.second);
-		#else
-		const float thLongEdge(edgeLens.GetNth(edgeLens.size()*95/100)*fSpurious);
-		#endif
 		// remove faces with too long edges
+		const float thLongEdge(SQRT(edgeLens.GetNth(edgeLens.size()*95/100))*fSpurious);
 		const size_t numLongFaces(vcg::tri::UpdateSelection<CLEAN::Mesh>::FaceOutOfRangeEdge(mesh, 0, thLongEdge));
 		for (CLEAN::Mesh::FaceIterator fi=mesh.face.begin(); fi!=mesh.face.end(); ++fi)
 			if (!(*fi).IsD() && (*fi).IsS())
 				vcg::tri::Allocator<CLEAN::Mesh>::DeleteFace(mesh, *fi);
 		DEBUG_ULTIMATE("Removed %d faces with edges longer than %f", numLongFaces, thLongEdge);
 		// remove isolated components
+		const float thLongSize(SQRT(edgeLens.GetNth(edgeLens.size()*55/100))*fSpurious);
 		vcg::tri::UpdateTopology<CLEAN::Mesh>::FaceFace(mesh);
-		const std::pair<int, int> delInfo(vcg::tri::Clean<CLEAN::Mesh>::RemoveSmallConnectedComponentsDiameter(mesh, thLongEdge));
+		const std::pair<int, int> delInfo(vcg::tri::Clean<CLEAN::Mesh>::RemoveSmallConnectedComponentsDiameter(mesh, thLongSize));
 		DEBUG_ULTIMATE("Removed %d connected components out of %d", delInfo.second, delInfo.first);
 	}
 
@@ -1205,7 +1246,8 @@ bool Mesh::Load(const String& fileName)
 		ret = LoadPLY(fileName);
 	if (!ret)
 		return false;
-	DEBUG_EXTRA("Mesh loaded: %u vertices, %u faces (%s)", vertices.size(), faces.size(), TD_TIMER_GET_FMT().c_str());
+	DEBUG_EXTRA("Mesh '%s' loaded: %u vertices, %u faces (%s)",
+		Util::getFileNameExt(fileName).c_str(), vertices.size(), faces.size(), TD_TIMER_GET_FMT().c_str());
 	return true;
 }
 // import the mesh as a PLY file
@@ -1234,7 +1276,7 @@ bool Mesh::LoadPLY(const String& fileName)
 	if (vertices.empty() && faces.empty())
 		return true;
 	if (vertices.empty() || faces.empty()) {
-		DEBUG_EXTRA("error: invalid mesh file");
+		Release();
 		return false;
 	}
 
@@ -1320,12 +1362,12 @@ bool Mesh::LoadOBJ(const String& fileName)
 	}
 
 	// store vertices
-	ASSERT(sizeof(ObjModel::Vertex) == sizeof(Vertex));
+	STATIC_ASSERT(sizeof(ObjModel::Vertex) == sizeof(Vertex));
 	ASSERT(model.get_vertices().size() < std::numeric_limits<VIndex>::max());
 	vertices.CopyOf(&model.get_vertices()[0], (VIndex)model.get_vertices().size());
 
 	// store vertex normals
-	ASSERT(sizeof(ObjModel::Normal) == sizeof(Normal));
+	STATIC_ASSERT(sizeof(ObjModel::Normal) == sizeof(Normal));
 	ASSERT(model.get_vertices().size() < std::numeric_limits<VIndex>::max());
 	if (!model.get_normals().empty()) {
 		ASSERT(model.get_normals().size() == model.get_vertices().size());
@@ -1333,6 +1375,7 @@ bool Mesh::LoadOBJ(const String& fileName)
 	}
 
 	// store faces
+	ASSERT_ARE_SAME_TYPE(ObjModel::TexCoord, TexCoord);
 	FOREACH(groupIdx, model.get_groups()) {
 		const auto& group = model.get_groups()[groupIdx];
 		ASSERT(group.faces.size() < std::numeric_limits<FIndex>::max());
@@ -1389,6 +1432,20 @@ bool Mesh::LoadGLTF(const String& fileName, bool bBinary)
 		if (!warn.empty())
 			DEBUG("warning: %s", warn.c_str());
 	}
+
+	// check if the model contains any mesh
+	bool bHasMesh = false;
+	for (const tinygltf::Mesh& gltfMesh : gltfModel.meshes) {
+		for (const tinygltf::Primitive& gltfPrimitive : gltfMesh.primitives) {
+			if (gltfPrimitive.mode == TINYGLTF_MODE_TRIANGLES) {
+				bHasMesh = true;
+				break;
+			}
+		}
+		if (bHasMesh) break;
+	}
+	if (!bHasMesh)
+		return false;
 
 	// parse model
 	for (const tinygltf::Mesh& gltfMesh : gltfModel.meshes) {
@@ -1447,6 +1504,8 @@ bool Mesh::LoadGLTF(const String& fileName, bool bBinary)
 // export the mesh to the given file
 bool Mesh::Save(const String& fileName, const cList<String>& comments, bool bBinary) const
 {
+	if (IsEmpty())
+		return false;
 	TD_TIMER_STARTD();
 	const String ext(Util::getFileExt(fileName).ToLower());
 	bool ret;
@@ -1459,7 +1518,8 @@ bool Mesh::Save(const String& fileName, const cList<String>& comments, bool bBin
 		ret = SavePLY(ext != _T(".ply") ? String(fileName+_T(".ply")) : fileName, comments, bBinary);
 	if (!ret)
 		return false;
-	DEBUG_EXTRA("Mesh saved: %u vertices, %u faces (%s)", vertices.size(), faces.size(), TD_TIMER_GET_FMT().c_str());
+	DEBUG_EXTRA("Mesh '%s' saved: %u vertices, %u faces (%s)",
+		Util::getFileNameExt(fileName).c_str(), vertices.size(), faces.size(), TD_TIMER_GET_FMT().c_str());
 	return true;
 }
 // export the mesh as a PLY file
@@ -1483,7 +1543,7 @@ bool Mesh::SavePLY(const String& fileName, const cList<String>& comments, bool b
 	// export texture file name as comment if needed
 	if (HasTexture()) {
 		FOREACH(texId, texturesDiffuse) {
-		    const String textureFileName(Util::getFileFullName(fileName) + std::to_string(texId).c_str() + (bTexLossless?_T(".png"):_T(".jpg")));
+		    const String textureFileName(Util::getFileFullName(fileName) + std::to_string((unsigned)texId).c_str() + (bTexLossless?_T(".png"):_T(".jpg")));
 		    ply.append_comment((_T("TextureFile ")+Util::getFileNameExt(textureFileName)).c_str());
 		    texturesDiffuse[texId].Save(textureFileName);
 		}
@@ -1547,11 +1607,11 @@ bool Mesh::SaveOBJ(const String& fileName) const
 	ObjModel model;
 
 	// store vertices
-	ASSERT(sizeof(ObjModel::Vertex) == sizeof(Vertex));
+	STATIC_ASSERT(sizeof(ObjModel::Vertex) == sizeof(Vertex));
 	model.get_vertices().insert(model.get_vertices().begin(), vertices.begin(), vertices.end());
 
 	// store vertex normals
-	ASSERT(sizeof(ObjModel::Normal) == sizeof(Normal));
+	STATIC_ASSERT(sizeof(ObjModel::Normal) == sizeof(Normal));
 	ASSERT(model.get_vertices().size() < std::numeric_limits<VIndex>::max());
 	if (!vertexNormals.empty()) {
 		ASSERT(vertexNormals.size() == vertices.size());
@@ -1559,7 +1619,7 @@ bool Mesh::SaveOBJ(const String& fileName) const
 	}
 
 	// store face texture coordinates
-	ASSERT(sizeof(ObjModel::TexCoord) == sizeof(TexCoord));
+	STATIC_ASSERT(sizeof(ObjModel::TexCoord) == sizeof(TexCoord));
 	if (!faceTexcoords.empty()) {
 		// translate, normalize and flip Y axis of the texture coordinates
 		TexCoordArr normFaceTexcoords;
@@ -1569,14 +1629,13 @@ bool Mesh::SaveOBJ(const String& fileName) const
 	}
 
 	// store faces
-	FOREACH(idxTexture, texturesDiffuse) {
-		ObjModel::Group& group = model.AddGroup(_T("material_" + std::to_string(idxTexture)));
-		group.faces.reserve(faces.size());
+	TexIndex idxTexture(0);
+	do {
+		ObjModel::Group& group = model.AddGroup(HasTexture() ? String::FormatString("material_%02u", idxTexture) : String(""));
+		group.faces.reserve(texturesDiffuse.empty() ? faces.size() : faces.size()/texturesDiffuse.size());
 		FOREACH(idxFace, faces) {
-			const auto texIdx = faceTexindices[idxFace];
-			if (texIdx != idxTexture)
-			    continue;
-
+			if (!faceTexindices.empty() && faceTexindices[idxFace] != idxTexture)
+				continue;
 			const Face& face = faces[idxFace];
 			ObjModel::Face f;
 			memset(&f, 0xFF, sizeof(ObjModel::Face));
@@ -1587,12 +1646,16 @@ bool Mesh::SaveOBJ(const String& fileName) const
 				if (!vertexNormals.empty())
 					f.normals[i] = face[i];
 			}
-			group.faces.push_back(f);
+			group.faces.emplace_back(f);
 		}
-		ObjModel::MaterialLib::Material* pMaterial(model.GetMaterial(group.material_name));
-		ASSERT(pMaterial != NULL);
-		pMaterial->diffuse_map = texturesDiffuse[idxTexture];
-	}
+
+		// store texture
+		if (HasTexture()) {
+			ObjModel::MaterialLib::Material* pMaterial(model.GetMaterial(group.material_name));
+			ASSERT(pMaterial != NULL);
+			pMaterial->diffuse_map = texturesDiffuse[idxTexture];
+		}
+	} while (++idxTexture < texturesDiffuse.size());
 
 	return model.Save(fileName);
 }
@@ -1768,9 +1831,9 @@ bool Mesh::SaveGLTF(const String& fileName, bool bBinary) const
 			image->uri = Util::isFullPath(filename->c_str()) ?
 				Util::getRelativePath(*basepath, *filename) : String(*filename);
 			String basePath(*basepath);
-			return cv::imwrite(
-				Util::ensureFolderSlash(basePath) + image->uri,
-				cv::Mat(image->height, image->width, CV_8UC3, image->image.data()));
+			return SaveImage(
+				cv::Mat(image->height, image->width, CV_8UC3, image->image.data()),
+				Util::ensureFolderSlash(basePath) + image->uri);
 		}
 	};
 	tinygltf::TinyGLTF gltf;
@@ -2194,7 +2257,7 @@ static bool CanCollapseEdge(Vertex::Halfedge_handle v0v1)
 			t3 = REPLACE_POINT(t3, p0, p1, p_middle);
 			a2 = CGAL::cross_product(t2-t1, t3-t2);
 
-			if ((v_norm(a2) != 0) && (v_angle(a1, a2) > PI/2))
+			if ((v_norm(a2) != 0) && (v_angle(a1, a2) > HALF_PI))
 				return false;
 		}
 	}
@@ -2300,7 +2363,7 @@ static void SplitEdge(Polyhedron& p, Vertex::Halfedge_handle h, int mode=1)
 		const double ratio(0.5);
 		p_midddle = p1 + (p2-p1) * ratio;
 	} else { // projection of the 3rd vertex
-		const double ratio(v_norm(p3-p2) * cos(OppositeAngle(h->next())) / v_norm(p1-p2));
+		const double ratio(v_norm(p3-p2) * COS(OppositeAngle(h->next())) / v_norm(p1-p2));
 		p_midddle = p2 + (p1-p2) * ratio;
 	}
 
@@ -2438,16 +2501,16 @@ static int ImproveVertexValence(Polyhedron& p, int valence_mode=2)
 
 static void UpdateMeshData(Polyhedron& p);
 
-// Description: 
+// Description:
 //  It iterates through all the mesh vertices and it tries to fix degenerate triangles.
 //  There are conditions that check for large and small angles.
 // Parameters:
-//  - degenerateAngleDeg 
+//  - degenerateAngleDeg
 //     - for large angles: if an angle is bigger than degenerateAngleDeg.
 //     - a good values to use is typically 170
-//  - collapseRatio 
+//  - collapseRatio
 //     - for small angles: given the corresponding edges (a,b,c) in all permutations, if (a/b < collapseRatio) & (a/c < collapseRatio)
-//     - a good value to use is 0.1 
+//     - a good value to use is 0.1
 static int FixDegeneracy(Polyhedron& p, double collapseRatio, double degenerateAngleDeg)
 {
 	DEBUG_LEVEL(3, "Fix degeneracy: %g collapse-ratio, %g degenerate-angle", collapseRatio, degenerateAngleDeg);
@@ -2657,7 +2720,7 @@ static void Smooth(Polyhedron& p, double delta, int mode=0)
 }
 
 
-// Description: 
+// Description:
 // - The goal of this method is to ensure that all the edges of the mesh are within the interval [epsilonMin,epsilonMax].
 //   In order to do so, edge collapses and edge split operations are performed.
 // - The method also attempts to fix degeneracies by invoking FixDegeneracy(collapseRatio,degenerate_angle_deg) and performs some local smoothing, based on the operating mode.
@@ -2668,7 +2731,7 @@ static void Smooth(Polyhedron& p, double delta, int mode=0)
 //          1 - fixDegeneracy=Yes smoothing=Yes; (default)
 //         10 - fixDegeneracy=Yes smoothing=No;
 // - max_iter (default=30) - maximum number of iterations to be performed; since there is no guarantee that one operations (such as a collapse, for example)
-//   will not in turn generate new degeneracies, operations are being performed on the mesh in an iterative fashion. 
+//   will not in turn generate new degeneracies, operations are being performed on the mesh in an iterative fashion.
 static void EnsureEdgeSize(Polyhedron& p, double epsilonMin, double epsilonMax, double collapseRatio, double degenerate_angle_deg, int mode, int max_iters, int comp_size_threshold)
 {
 	if (mode>0)
@@ -2763,7 +2826,7 @@ static void EnsureEdgeSize(Polyhedron& p, double epsilonMin, double epsilonMax, 
 		ComputeStatsEdge(p, edge);
 		VERBOSE("Edge size in [%g, %g] (requested in [%g, %g]): %d ops, %d iters", edge.min, edge.max, epsilonMin, epsilonMax, total_no_ops, iters);
 	}
-	#endif	
+	#endif
 }
 
 static void ComputeVertexNormals(Polyhedron& p)
@@ -2796,7 +2859,7 @@ static std::vector< std::pair<Vertex*, int> > GetRingNeighbourhood(Vertex& v, in
 	std::queue<Vertex*> elems;
 	std::vector< std::pair<Vertex*, int> > result;
 
-	// add base level	
+	// add base level
 	elems.push(&v);
 	neigh_map[&v]=0;
 
@@ -2865,7 +2928,7 @@ static void ComputeVertexLaplacian(Vertex& v)
 
 		float theta_1((float)v_angle(e, e_next));
 		float theta_2((float)v_angle(e, e_prev));
-		float w((tan(theta_1/2)+tan(theta_2/2))/v_norm(e));
+		float w((TAN(theta_1/2)+TAN(theta_2/2))/v_norm(e));
 
 		w_total += w;
 		result_laplacian = result_laplacian + w*e;
@@ -2907,7 +2970,7 @@ static void UpdateMeshData(Polyhedron& p)
 	// compute vertex normal
 	ComputeVertexNormals(p);
 	#if ROBUST_NORMALS>0
-	// compute robust vertex normal		
+	// compute robust vertex normal
 	for (Vertex_iterator vi=p.vertices_begin(); vi!=p.vertices_end(); vi++)
 		ComputeVertexRobustNormal(*vi, ROBUST_NORMALS);
 	#endif
@@ -2926,7 +2989,7 @@ static void UpdateMeshData(Polyhedron& p)
 		ComputeVertexLaplacianDeriv(*vi);
 	}
 
-	// set border edges	
+	// set border edges
 	for (Halfedge_iterator hi=p.border_halfedges_begin(); hi!=p.halfedges_end(); hi++)
 		hi->vertex()->setBorder();
 }
@@ -2946,7 +3009,7 @@ public:
 		typedef typename HDS::Vertex::Point Point;
 		CGAL::Polyhedron_incremental_builder_3<HDS> B(hds, false);
 		B.begin_surface(vertices.size(), faces.size());
-		// add the vertices		
+		// add the vertices
 		FOREACH(i, vertices) {
 			const Mesh::Vertex& v = vertices[i];
 			B.add_vertex(Point(v.x, v.y, v.z));
@@ -3534,6 +3597,136 @@ void Mesh::CloseHoleQuality(VertexIdxArr& verts)
 }
 /*----------------------------------------------------------------*/
 
+
+// remove degenerate faces, with one or more identical vertices or very close vertices (0 - disabled);
+// unreferenced vertices and non-manifold edges/vertices can be created,
+// so should be followed by RemoveUnreferencedVertices() and FixNonManifold()
+Mesh::FIndex Mesh::RemoveDegenerateFaces(Type thArea) {
+	if (vertexFaces.size() != vertices.size())
+		ListIncidentFaces();
+	const Type thDoubleAreaSq = SQUARE(thArea * 2);
+	FaceIdxArr facesRemove;
+	typedef std::pair<VIndex/*replace with*/, VIndex> Vertex2Vertex;
+	CLISTDEF0(Vertex2Vertex) vertexPairs;
+	RFOREACH(idxFace, faces) {
+		const Face& face = faces[idxFace];
+		// check first case when one or more vertices have same index
+		if (face[0] == face[1] || face[0] == face[2] || face[1] == face[2]) {
+			// just remove the face
+			facesRemove.emplace_back(idxFace);
+			continue;
+		}
+		if (thDoubleAreaSq <= 0)
+			continue;
+		// check if the face has almost 0 area (see EdgeFunction())
+		const Vertex& v0 = vertices[face[0]];
+		const Vertex& v1 = vertices[face[1]];
+		const Vertex& v2 = vertices[face[2]];
+		const Vertex A(v2 - v0);
+		const Vertex B(v1 - v0);
+		const Type doubleAreaSq = normSq(B.cross(A));
+		if (doubleAreaSq <= thDoubleAreaSq) {
+			// remove the face
+			facesRemove.emplace_back(idxFace);
+			const Type lenghSqA = normSq(A);
+			const Type lenghSqB = normSq(B);
+			const Type lenghSqC = normSq(v2 - v1);
+			// remove two of the vertices,
+			// moving all adjacent face to the remaining vertex
+			if (lenghSqA <= thArea && lenghSqB <= thArea) {
+				vertexPairs.emplace_back(face[2], face[0]);
+				vertexPairs.emplace_back(face[1], face[0]);
+			}
+			else if (lenghSqA <= thArea && lenghSqC <= thArea) {
+				vertexPairs.emplace_back(face[0], face[2]);
+				vertexPairs.emplace_back(face[1], face[2]);
+			}
+			else if (lenghSqB <= thArea && lenghSqC <= thArea) {
+				vertexPairs.emplace_back(face[0], face[1]);
+				vertexPairs.emplace_back(face[2], face[1]);
+			} else
+			// remove one of the vertices,
+			// moving all adjacent face to the closest remaining vertices
+			if (lenghSqA <= thArea) {
+				vertexPairs.emplace_back(face[2], face[0]);
+			}
+			else if (lenghSqB <= thArea) {
+				vertexPairs.emplace_back(face[1], face[0]);
+			}
+			else if (lenghSqC <= thArea) {
+				vertexPairs.emplace_back(face[1], face[2]);
+			} else {
+				// the vertices are (almost) collinear, remove the smallest edge
+				if (lenghSqA < lenghSqB) {
+					if (lenghSqA < lenghSqC)
+						vertexPairs.emplace_back(face[2], face[0]);
+					else
+						vertexPairs.emplace_back(face[2], face[1]);
+				} else {
+					if (lenghSqB < lenghSqC)
+						vertexPairs.emplace_back(face[1], face[0]);
+					else
+						vertexPairs.emplace_back(face[2], face[1]);
+				}
+			}
+		}
+	}
+	if (facesRemove.empty())
+		return 0;
+	RemoveFaces(facesRemove, true);
+	if (vertexPairs.empty()) {
+		DEBUG("Removed %u degenerate faces", facesRemove.size());
+		return facesRemove.size();
+	}
+	// replace first vertex with the second
+	VertexIdxArr mapRemovedVerts(vertices.size());
+	mapRemovedVerts.MemsetValue(NO_ID);
+	const auto TraceMovedVertex = [&mapRemovedVerts](IIndex idx) {
+		while (mapRemovedVerts[idx] != NO_ID)
+			idx = mapRemovedVerts[idx];
+		return idx;
+	};
+	vertexPairs.RemoveDuplicates();
+	RFOREACHPTR(ptrIdxPair, vertexPairs) {
+		Vertex2Vertex p = *ptrIdxPair;
+		p.first = TraceMovedVertex(p.first);
+		p.second = TraceMovedVertex(p.second);
+		if (p.first == p.second)
+			continue;
+		FaceIdxArr& firstVfs = vertexFaces[p.first];
+		for (const FIndex idxFace : firstVfs) {
+			Face& face = faces[idxFace];
+			for (VIndex i = 0; i < 3; ++i)
+				if (face[i] == p.first)
+					face[i] = p.second;
+		}
+		FaceIdxArr& secondVfs = vertexFaces[p.second];
+		secondVfs.Join(firstVfs);
+		secondVfs.RemoveDuplicates();
+		firstVfs.Release();
+		mapRemovedVerts[p.first] = p.second;
+	}
+	const FIndex numRemovedFaces = facesRemove.size() + RemoveDegenerateFaces(0.f);
+	if (numRemovedFaces > 0)
+		DEBUG_ULTIMATE("Removed %u zero-area faces", numRemovedFaces);
+	return numRemovedFaces;
+}
+
+// removing zero-area-faces can generate some new zero-area-faces,
+// so iterate till no zero-area faces are encountered or max number of iterations is reached
+Mesh::FIndex Mesh::RemoveDegenerateFaces(unsigned maxIterations, Type thArea) {
+	FIndex totalNumRemovedFaces = 0;
+	for (unsigned iter=0; iter<maxIterations; ++iter) {
+		const FIndex numRemovedFaces = RemoveDegenerateFaces(thArea);
+		if (numRemovedFaces == 0)
+			break;
+		totalNumRemovedFaces += numRemovedFaces;
+	}
+	return totalNumRemovedFaces;
+}
+/*----------------------------------------------------------------*/
+
+
 // crop mesh such that none of its faces is touching or outside the given bounding-box
 void Mesh::RemoveFacesOutside(const OBB3f& obb) {
 	ASSERT(obb.IsValid());
@@ -3543,7 +3736,7 @@ void Mesh::RemoveFacesOutside(const OBB3f& obb) {
 			vertexRemove.emplace_back(i);
 	if (!vertexRemove.empty()) {
 		if (vertices.size() != vertexFaces.size())
-			ListIncidenteFaces();
+			ListIncidentFaces();
 		RemoveVertices(vertexRemove, true);
 	}
 }
@@ -3559,10 +3752,15 @@ void Mesh::RemoveFaces(FaceIdxArr& facesRemove, bool bUpdateLists)
 			if (idxLast == idxF)
 				continue;
 			faces.RemoveAt(idxF);
+			if (!faceNormals.empty())
+				faceNormals.RemoveAt(idxF);
 			if (!faceTexcoords.empty())
 				faceTexcoords.RemoveAt(idxF * 3, 3);
+			if (!faceTexindices.empty())
+				faceTexindices.RemoveAt(idxF);
 			idxLast = idxF;
 		}
+		vertexFaces.Release();
 	} else {
 		ASSERT(vertices.size() == vertexFaces.size());
 		RFOREACHPTR(pIdxF, facesRemove) {
@@ -3593,8 +3791,12 @@ void Mesh::RemoveFaces(FaceIdxArr& facesRemove, bool bUpdateLists)
 				}
 			}
 			faces.RemoveAt(idxF);
+			if (!faceNormals.empty())
+				faceNormals.RemoveAt(idxF);
 			if (!faceTexcoords.empty())
 				faceTexcoords.RemoveAt(idxF * 3, 3);
+			if (!faceTexindices.empty())
+				faceTexindices.RemoveAt(idxF);
 			idxLast = idxF;
 		}
 	}
@@ -3616,8 +3818,8 @@ void Mesh::RemoveVertices(VertexIdxArr& vertexRemove, bool bUpdateLists)
 			if (idxV < idxVM) {
 				// update all faces of the moved vertex
 				const FaceIdxArr& vf(vertexFaces[idxVM]);
-				FOREACHPTR(pIdxF, vf)
-					GetVertex(faces[*pIdxF], idxVM) = idxV;
+				for (const FIndex idxF : vf)
+					GetVertex(faces[idxF], idxVM) = idxV;
 			}
 			vertexFaces.RemoveAt(idxV);
 			vertices.RemoveAt(idxV);
@@ -3634,8 +3836,8 @@ void Mesh::RemoveVertices(VertexIdxArr& vertexRemove, bool bUpdateLists)
 		if (idxV < idxVM) {
 			// update all faces of the moved vertex
 			const FaceIdxArr& vf(vertexFaces[idxVM]);
-			FOREACHPTR(pIdxF, vf)
-				GetVertex(faces[*pIdxF], idxVM) = idxV;
+			for (const FIndex idxF : vf)
+				GetVertex(faces[idxF], idxVM) = idxV;
 		}
 		if (!vertexFaces.empty()) {
 			facesRemove.Join(vertexFaces[idxV]);
@@ -3648,6 +3850,60 @@ void Mesh::RemoveVertices(VertexIdxArr& vertexRemove, bool bUpdateLists)
 	}
 	if (!facesRemove.empty())
 		RemoveFaces(facesRemove);
+}
+
+// remove duplicate vertices (equal coordinates);
+// return the number of removed vertices, and optionally the list of duplicated vertices
+Mesh::VIndex Mesh::RemoveDuplicatedVertices(VertexIdxArr* duplicatedVertices) {
+	// create a map of unique vertices
+	VIndex numUniqueVertices(0);
+    VertexIdxArr mapVertices(vertices.size()); {
+		std::unordered_map<Vertex,VIndex,std::hash<Vertex::Base>> mapVertexIndex;
+		FOREACH(i, vertices) {
+			const Vertex& vertex = vertices[i];
+			const auto ret = mapVertexIndex.emplace(vertex, (VIndex)mapVertexIndex.size());
+			if (ret.second) {
+				// new vertex found
+				mapVertices[i] = i;
+			} else {
+				// duplicate vertex found
+				mapVertices[i] = ret.first->second;
+				if (duplicatedVertices)
+					duplicatedVertices->push_back(i);
+			}
+		}
+		numUniqueVertices = (VIndex)mapVertexIndex.size();
+		if (numUniqueVertices == vertices.size())
+			return 0;
+		ReleaseComputable();
+	}
+    // update the vertices and vertexNormals arrays
+    VertexArr newVertices(0, numUniqueVertices);
+    VertexArr newVertexNormals;
+	if (!vertexNormals.empty())
+		newVertexNormals.reserve(numUniqueVertices);
+	FOREACH(i, vertices) {
+		VIndex& uniqueIndex = mapVertices[i];
+		if (uniqueIndex != i)
+			continue;
+		uniqueIndex = newVertices.size();
+        newVertices.emplace_back(vertices[i]);
+		if (!vertexNormals.empty())
+			newVertexNormals.emplace_back(vertexNormals[i]);
+    }
+    vertices = std::move(newVertices);
+	if (!vertexNormals.empty())
+		vertexNormals = std::move(newVertexNormals);
+    // update the vertex indices in the faces
+    for (Face& face: faces) {
+        for (int i = 0; i < 3; ++i) {
+            face[i] = mapVertices[face[i]];
+			ASSERT(face[i] != NO_ID);
+        }
+    }
+    const VIndex numDuplicated(mapVertices.size() - vertices.size());
+	DEBUG_ULTIMATE("Removed %u duplicated vertices", numDuplicated);
+	return numDuplicated;
 }
 
 // remove all vertices that are not assigned to any face
@@ -3663,6 +3919,7 @@ Mesh::VIndex Mesh::RemoveUnreferencedVertices(bool bUpdateLists)
 	if (vertexRemove.empty())
 		return 0;
 	RemoveVertices(vertexRemove, bUpdateLists);
+	DEBUG_ULTIMATE("Removed %u unreferenced vertices", vertexRemove.size());
 	return vertexRemove.size();
 }
 
@@ -3684,7 +3941,7 @@ void Mesh::ConvertTexturePerVertex(Mesh& mesh) const
 		// with the same position, but different texture coordinates
 		const Face& face = faces[idxF];
 		Face& newface = mesh.faces[idxF];
-		const TexIndex ti = !faceTexindices.empty() ? faceTexindices[idxF] : 0;
+		const TexIndex ti = GetFaceTextureIndex(idxF);
 		for (int i=0; i<3; ++i) {
 			const TexCoord& tc = faceTexcoords[idxF*3+i];
 			VIndex idxV(face[i]);
@@ -3731,13 +3988,13 @@ Planef Mesh::EstimateGroundPlane(const ImageArr& images, float sampleMesh, float
 	ASSERT(!IsEmpty());
 	PointCloud pointcloud;
 	if (sampleMesh != 0) {
-		// create the point cloud by sampling the mesh
+		// create the point-cloud by sampling the mesh
 		if (sampleMesh > 0)
 			SamplePoints(sampleMesh, 0, pointcloud);
 		else
 			SamplePoints(ROUND2INT<unsigned>(-sampleMesh), pointcloud);
 	} else {
-		// create the point cloud containing all vertices
+		// create the point-cloud containing all vertices
 		for (const Vertex& X: vertices)
 			pointcloud.points.emplace_back(X);
 	}
@@ -3879,9 +4136,11 @@ void Mesh::Project(const Camera& camera, DepthMap& depthMap) const
 			: Base(_vertices, _camera, _depthMap) {}
 	};
 	RasterMesh rasterer(vertices, camera, depthMap);
+	RasterMesh::Triangle triangle;
+	RasterMesh::TriangleRasterizer triangleRasterizer(triangle, rasterer);
 	rasterer.Clear();
 	for (const Face& facet: faces)
-		rasterer.Project(facet);
+		rasterer.Project(facet, triangleRasterizer);
 }
 void Mesh::Project(const Camera& camera, DepthMap& depthMap, Image8U3& image) const
 {
@@ -3898,9 +4157,9 @@ void Mesh::Project(const Camera& camera, DepthMap& depthMap, Image8U3& image) co
 			Base::Clear();
 			image.memset(0);
 		}
-		void Raster(const ImageRef& pt, const Point3f& bary) {
-			const Point3f pbary(PerspectiveCorrectBarycentricCoordinates(bary));
-			const Depth z(ComputeDepth(pbary));
+		void Raster(const ImageRef& pt, const Triangle& t, const Point3f& bary) {
+			const Point3f pbary(PerspectiveCorrectBarycentricCoordinates(t, bary));
+			const Depth z(ComputeDepth(t, pbary));
 			ASSERT(z > Depth(0));
 			Depth& depth = depthMap(pt);
 			if (depth == 0 || depth > z) {
@@ -3916,11 +4175,13 @@ void Mesh::Project(const Camera& camera, DepthMap& depthMap, Image8U3& image) co
 	if (image.size() != depthMap.size())
 		image.create(depthMap.size());
 	RasterMesh rasterer(*this, camera, depthMap, image);
+	RasterMesh::Triangle triangle;
+	RasterMesh::TriangleRasterizer triangleRasterizer(triangle, rasterer);
 	rasterer.Clear();
 	FOREACH(idxFace, faces) {
 		const Face& facet = faces[idxFace];
 		rasterer.idxFaceTex = idxFace*3;
-		rasterer.Project(facet);
+		rasterer.Project(facet, triangleRasterizer);
 	}
 }
 // project mesh to the given camera plane, computing also the normal-map (in camera space)
@@ -3939,13 +4200,13 @@ void Mesh::Project(const Camera& camera, DepthMap& depthMap, NormalMap& normalMa
 			Base::Clear();
 			normalMap.memset(0);
 		}
-		inline void Project(const Face& facet) {
+		inline void Project(const Face& facet, TriangleRasterizer& tr) {
 			idxVerts = facet.ptr();
-			Base::Project(facet);
+			Base::Project(facet, tr);
 		}
-		void Raster(const ImageRef& pt, const Point3f& bary) {
-			const Point3f pbary(PerspectiveCorrectBarycentricCoordinates(bary));
-			const Depth z(ComputeDepth(pbary));
+		void Raster(const ImageRef& pt, const Triangle& t, const Point3f& bary) {
+			const Point3f pbary(PerspectiveCorrectBarycentricCoordinates(t, bary));
+			const Depth z(ComputeDepth(t, pbary));
 			ASSERT(z > Depth(0));
 			Depth& depth = depthMap(pt);
 			if (depth == Depth(0) || depth > z) {
@@ -3961,10 +4222,12 @@ void Mesh::Project(const Camera& camera, DepthMap& depthMap, NormalMap& normalMa
 	if (normalMap.size() != depthMap.size())
 		normalMap.create(depthMap.size());
 	RasterMesh rasterer(*this, camera, depthMap, normalMap);
+	RasterMesh::Triangle triangle;
+	RasterMesh::TriangleRasterizer triangleRasterizer(triangle, rasterer);
 	rasterer.Clear();
 	// render the entire mesh
 	for (const Face& facet: faces)
-		rasterer.Project(facet);
+		rasterer.Project(facet, triangleRasterizer);
 }
 // project mesh to the given camera plane using orthographic projection
 void Mesh::ProjectOrtho(const Camera& camera, DepthMap& depthMap) const
@@ -3973,12 +4236,12 @@ void Mesh::ProjectOrtho(const Camera& camera, DepthMap& depthMap) const
 		typedef TRasterMesh<RasterMesh> Base;
 		RasterMesh(const VertexArr& _vertices, const Camera& _camera, DepthMap& _depthMap)
 			: Base(_vertices, _camera, _depthMap) {}
-		inline bool ProjectVertex(const Mesh::Vertex& pt, int v) {
-			return (ptc[v] = camera.TransformPointW2C(Cast<REAL>(pt))).z > 0 &&
-				depthMap.isInsideWithBorder<float,3>(pti[v] = camera.TransformPointOrthoC2I(ptc[v]));
+		inline bool ProjectVertex(const Mesh::Vertex& pt, int v, Triangle& t) {
+			return (t.ptc[v] = camera.TransformPointW2C(Cast<REAL>(pt))).z > 0 &&
+				depthMap.isInsideWithBorder<float,3>(t.pti[v] = camera.TransformPointOrthoC2I(t.ptc[v]));
 		}
-		void Raster(const ImageRef& pt, const Point3f& bary) {
-			const Depth z(ComputeDepth(bary));
+		void Raster(const ImageRef& pt, const Triangle& t, const Point3f& bary) {
+			const Depth z(ComputeDepth(t, bary));
 			ASSERT(z > Depth(0));
 			Depth& depth = depthMap(pt);
 			if (depth == 0 || depth > z)
@@ -3986,9 +4249,11 @@ void Mesh::ProjectOrtho(const Camera& camera, DepthMap& depthMap) const
 		}
 	};
 	RasterMesh rasterer(vertices, camera, depthMap);
+	RasterMesh::Triangle triangle;
+	RasterMesh::TriangleRasterizer triangleRasterizer(triangle, rasterer);
 	rasterer.Clear();
 	for (const Face& facet: faces)
-		rasterer.Project(facet);
+		rasterer.Project(facet, triangleRasterizer);
 }
 void Mesh::ProjectOrtho(const Camera& camera, DepthMap& depthMap, Image8U3& image) const
 {
@@ -4005,12 +4270,12 @@ void Mesh::ProjectOrtho(const Camera& camera, DepthMap& depthMap, Image8U3& imag
 			Base::Clear();
 			image.memset(0);
 		}
-		inline bool ProjectVertex(const Mesh::Vertex& pt, int v) {
-			return (ptc[v] = camera.TransformPointW2C(Cast<REAL>(pt))).z > 0 &&
-				depthMap.isInsideWithBorder<float,3>(pti[v] = camera.TransformPointOrthoC2I(ptc[v]));
+		inline bool ProjectVertex(const Mesh::Vertex& pt, int v, Triangle& t) {
+			return (t.ptc[v] = camera.TransformPointW2C(Cast<REAL>(pt))).z > 0 &&
+				depthMap.isInsideWithBorder<float,3>(t.pti[v] = camera.TransformPointOrthoC2I(t.ptc[v]));
 		}
-		void Raster(const ImageRef& pt, const Point3f& bary) {
-			const Depth z(ComputeDepth(bary));
+		void Raster(const ImageRef& pt, const Triangle& t, const Point3f& bary) {
+			const Depth z(ComputeDepth(t, bary));
 			ASSERT(z > Depth(0));
 			Depth& depth = depthMap(pt);
 			if (depth == 0 || depth > z) {
@@ -4026,11 +4291,13 @@ void Mesh::ProjectOrtho(const Camera& camera, DepthMap& depthMap, Image8U3& imag
 	if (image.size() != depthMap.size())
 		image.create(depthMap.size());
 	RasterMesh rasterer(*this, camera, depthMap, image);
+	RasterMesh::Triangle triangle;
+	RasterMesh::TriangleRasterizer triangleRasterizer(triangle, rasterer);
 	rasterer.Clear();
 	FOREACH(idxFace, faces) {
 		const Face& facet = faces[idxFace];
 		rasterer.idxFaceTex = idxFace*3;
-		rasterer.Project(facet);
+		rasterer.Project(facet, triangleRasterizer);
 	}
 }
 // assuming the mesh is properly oriented, ortho-project it to a camera looking from top to down
@@ -4145,27 +4412,33 @@ Mesh Mesh::SubMesh(const FaceIdxArr& chunk) const
 				mesh.faceTexcoords.emplace_back(tri[i]);
 		}
 	}
-	mesh.ListIncidenteFaces();
+	mesh.ListIncidentFaces();
 	mesh.RemoveUnreferencedVertices();
 	mesh.FixNonManifold();
 	return mesh;
 } // SubMesh
 /*----------------------------------------------------------------*/
 
-// extract one sub-mesh for each texture, i.e. for each value of faceTexindices;
-std::vector<Mesh> Mesh::SplitMeshPerTextureBlob() const {
-
+// extract one sub-mesh for each texture, i.e. for each value of faceTexindices:
+//  - mapFaceSubsetIndices: if not null, for each face of the original mesh,
+//    contains the index of the face in the corresponding sub-mesh
+std::vector<Mesh> Mesh::SplitMeshPerTextureBlob(FaceIdxArr* mapFaceSubsetIndices) const {
 	ASSERT(HasTexture());
 	if (texturesDiffuse.size() == 1)
 		return {*this};
+	if (mapFaceSubsetIndices)
+		mapFaceSubsetIndices->resize(faces.size());
 	ASSERT(faceTexindices.size() == faces.size());
 	std::vector<Mesh> submeshes;
 	submeshes.reserve(texturesDiffuse.size());
 	FOREACH(texId, texturesDiffuse) {
 		FaceIdxArr chunk;
 		FOREACH(idxFace, faceTexindices) {
-			if (faceTexindices[idxFace] == texId)
+			if (faceTexindices[idxFace] == texId) {
+				if (mapFaceSubsetIndices)
+					(*mapFaceSubsetIndices)[idxFace] = chunk.size();
 				chunk.push_back(idxFace);
+			}
 		}
 		Mesh submesh = SubMesh(chunk);
 		submesh.texturesDiffuse.emplace_back(texturesDiffuse[texId]);
@@ -4199,16 +4472,16 @@ bool Mesh::TransferTexture(Mesh& mesh, const FaceIdxArr& faceSubsetIndices, unsi
 		}
 	}
 	Image8U mask(mesh.texturesDiffuse.back().size(), uint8_t(255));
-	const FIndex num_faces(faceSubsetIndices.empty() ? mesh.faces.size() : faceSubsetIndices.size());
+	const FIndex numFaces(faceSubsetIndices.empty() ? mesh.faces.size() : faceSubsetIndices.size());
 	if (vertices == mesh.vertices && faces == mesh.faces) {
 		// the two meshes are identical, only the texture coordinates are different;
 		// directly transfer the texture onto the new coordinates
 		#ifdef MESH_USE_OPENMP
 		#pragma omp parallel for schedule(dynamic)
-		for (int_t i=0; i<(int_t)num_faces; ++i) {
+		for (int_t i=0; i<(int_t)numFaces; ++i) {
 			const FIndex idx((FIndex)i);
 		#else
-		FOREACHRAW(idx, num_faces) {
+		FOREACHRAW(idx, numFaces) {
 		#endif
 			const FIndex idxFace(faceSubsetIndices.empty() ? idx : faceSubsetIndices[idx]);
 			struct RasterTriangle {
@@ -4235,7 +4508,7 @@ bool Mesh::TransferTexture(Mesh& mesh, const FaceIdxArr& faceSubsetIndices, unsi
 		// the two meshes are different, transfer the texture by finding the closest point
 		// on the two surfaces
 		if (vertexFaces.size() != vertices.size())
-			ListIncidenteFaces();
+			ListIncidentFaces();
 		if (mesh.vertexNormals.size() != mesh.vertices.size())
 			mesh.ComputeNormalVertices();
 		#if USE_MESH_INT == USE_MESH_BVH
@@ -4314,10 +4587,10 @@ bool Mesh::TransferTexture(Mesh& mesh, const FaceIdxArr& faceSubsetIndices, unsi
 		#endif
 		#ifdef MESH_USE_OPENMP
 		#pragma omp parallel for schedule(dynamic)
-		for (int_t i=0; i<(int_t)num_faces; ++i) {
+		for (int_t i=0; i<(int_t)numFaces; ++i) {
 			const FIndex idx((FIndex)i);
 		#else
-		FOREACHRAW(idx, num_faces) {
+		FOREACHRAW(idx, numFaces) {
 		#endif
 			const FIndex idxFace(faceSubsetIndices.empty() ? idx : faceSubsetIndices[idx]);
 			struct RasterTriangle {
@@ -4399,6 +4672,27 @@ bool Mesh::TransferTexture(Mesh& mesh, const FaceIdxArr& faceSubsetIndices, unsi
 	}
 	return true;
 } // TransferTexture
+/*----------------------------------------------------------------*/
+
+// compute the memory size occupied by the mesh (in bytes)
+size_t MVS::Mesh::GetMemorySize() const {
+	if (IsEmpty())
+		return 0;
+	size_t nBytes = vertices.GetMemorySize();
+	nBytes += faces.GetMemorySize();
+	nBytes += vertexNormals.GetMemorySize();
+	nBytes += vertexVertices.GetMemorySize();
+	nBytes += vertexFaces.GetMemorySize();
+	nBytes += vertexBoundary.GetMemorySize();
+	nBytes += faceNormals.GetMemorySize();
+	nBytes += faceFaces.GetMemorySize();
+	nBytes += faceTexcoords.GetMemorySize();
+	nBytes += faceTexindices.GetMemorySize();
+	nBytes += texturesDiffuse.GetMemorySize();
+	for (const Image8U3& textureDiffuse: texturesDiffuse)
+		nBytes += textureDiffuse.memory_size();
+	return nBytes;
+}
 /*----------------------------------------------------------------*/
 
 
@@ -4518,3 +4812,89 @@ bool Mesh::InitKernels(int device)
 }
 /*----------------------------------------------------------------*/
 #endif
+
+
+#ifdef _USE_OPENMP
+// test mesh projection on the image using multi-threaded and single-threaded rasterization
+bool MVS::TestMeshProjectionMT(const Mesh& mesh, const Image& image) {
+	// used to render the mesh
+	typedef TImage<cuint32_t> FaceMap;
+	struct RasterMesh : TRasterMesh<RasterMesh> {
+		typedef TRasterMesh<RasterMesh> Base;
+		FaceMap& faceMap;
+		RasterMesh(const Mesh::VertexArr& _vertices, const Camera& _camera, DepthMap& _depthMap, FaceMap& _faceMap)
+			: Base(_vertices, _camera, _depthMap), faceMap(_faceMap) {}
+		void Clear() {
+			Base::Clear();
+			faceMap.memset((uint8_t)NO_ID);
+		}
+		void Raster(const ImageRef& pt, const Triangle& t, const Point3f& bary, Mesh::FIndex idxFace) {
+			const Point3f pbary(PerspectiveCorrectBarycentricCoordinates(t, bary));
+			const Depth z(ComputeDepth(t, pbary));
+			ASSERT(z > Depth(0));
+			Depth& depth = depthMap(pt);
+			if (depth == 0 || depth > z) {
+				depth = z;
+				faceMap(pt) = idxFace;
+			}
+		}
+	};
+	struct TriangleRasterizer {
+		RasterMesh* rasterizer;
+		RasterMesh::Triangle triangle;
+		Mesh::FIndex idxFace;
+		inline cv::Size Size() const {
+			return rasterizer->Size();
+		}
+		inline void operator()(const ImageRef& pt, const Point3f& bary) const {
+			rasterizer->Raster(pt, triangle, bary, idxFace);
+		}
+	};
+	// project mesh on the image
+	DepthMap depthMapMT(image.GetSize());
+	FaceMap faceMapMT(image.GetSize());
+	{	// multi-threaded rasterization
+		RasterMesh rasterer(mesh.vertices, image.camera, depthMapMT, faceMapMT);
+		TriangleRasterizer triangleRasterizer{&rasterer};
+		rasterer.Clear();
+		#pragma omp parallel for firstprivate(triangleRasterizer) schedule(dynamic)
+		for (int_t i=0; i<(int_t)mesh.faces.size(); ++i) {
+			const Mesh::FIndex idxFace = (Mesh::FIndex)i;
+			const Mesh::Face& facet = mesh.faces[idxFace];
+			triangleRasterizer.idxFace = idxFace;
+			rasterer.Project(facet, triangleRasterizer);
+		}
+	}
+	DepthMap depthMapST(image.GetSize());
+	FaceMap faceMapST(image.GetSize());
+	{	// single-threaded rasterization
+		RasterMesh rasterer(mesh.vertices, image.camera, depthMapST, faceMapST);
+		TriangleRasterizer triangleRasterizer{&rasterer};
+		rasterer.Clear();
+		FOREACH(idxFace, mesh.faces) {
+			const Mesh::Face& facet = mesh.faces[idxFace];
+			triangleRasterizer.idxFace = idxFace;
+			rasterer.Project(facet, triangleRasterizer);
+		}
+	}
+	// compare results
+	unsigned numDiffDepths(0), numDiffFaces(0);
+	for (int y = 0; y<depthMapST.rows; ++y) {
+		for (int x = 0; x<depthMapST.cols; ++x) {
+			const Depth depthMT = depthMapMT(y,x);
+			const Depth depthST = depthMapST(y,x);
+			if (depthMT != depthST)
+				++numDiffDepths;
+			const cuint32_t faceMT = faceMapMT(y,x);
+			const cuint32_t faceST = faceMapST(y,x);
+			if (faceMT != faceST)
+				++numDiffFaces;
+		}
+	}
+	VERBOSE("Mesh rasterization: %u different depths, %u different faces", numDiffDepths, numDiffFaces);
+	return numDiffDepths == 0 && numDiffFaces == 0;
+}
+/*----------------------------------------------------------------*/
+#endif // _USE_OPENMP
+
+#pragma pop_macro("VERBOSE")

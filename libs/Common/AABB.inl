@@ -19,9 +19,9 @@ inline TAABB<TYPE,DIMS>::TAABB(bool)
 {
 }
 template <typename TYPE, int DIMS>
-inline TAABB<TYPE,DIMS>::TAABB(const POINT& _pt)
+inline TAABB<TYPE,DIMS>::TAABB(const POINT& pt)
 	:
-	ptMin(_pt), ptMax(_pt)
+	ptMin(pt), ptMax(pt)
 {
 }
 template <typename TYPE, int DIMS>
@@ -34,6 +34,12 @@ template <typename TYPE, int DIMS>
 inline TAABB<TYPE,DIMS>::TAABB(const POINT& center, const TYPE& radius)
 	:
 	ptMin(center-POINT::Constant(radius)), ptMax(center+POINT::Constant(radius))
+{
+}
+template <typename TYPE, int DIMS>
+inline TAABB<TYPE,DIMS>::TAABB(const ALIGNEDBOX& box)
+	:
+	ptMin(box.min()), ptMax(box.max())
 {
 }
 template <typename TYPE, int DIMS>
@@ -59,9 +65,9 @@ inline void TAABB<TYPE,DIMS>::Reset()
 	ptMax = POINT::Constant(std::numeric_limits<TYPE>::lowest());
 }
 template <typename TYPE, int DIMS>
-inline void TAABB<TYPE,DIMS>::Set(const POINT& _pt)
+inline void TAABB<TYPE,DIMS>::Set(const POINT& pt)
 {
-	ptMin = ptMax = _pt;
+	ptMin = ptMax = pt;
 }
 template <typename TYPE, int DIMS>
 inline void TAABB<TYPE,DIMS>::Set(const POINT& _ptMin, const POINT& _ptMax)
@@ -74,6 +80,12 @@ inline void TAABB<TYPE,DIMS>::Set(const POINT& center, const TYPE& radius)
 {
 	ptMin = center-POINT::Constant(radius);
 	ptMax = center+POINT::Constant(radius);
+}
+template <typename TYPE, int DIMS>
+inline void TAABB<TYPE,DIMS>::Set(const ALIGNEDBOX& box)
+{
+	ptMin = box.min();
+	ptMax = box.max();
 }
 template <typename TYPE, int DIMS>
 template <typename TPoint>
@@ -117,6 +129,14 @@ inline TAABB<TYPE,DIMS>& TAABB<TYPE,DIMS>::EnlargePercent(TYPE x)
 
 
 template <typename TYPE, int DIMS>
+inline typename TAABB<TYPE,DIMS>::ALIGNEDBOX TAABB<TYPE,DIMS>::GetAlignedBox() const
+{
+	return ALIGNEDBOX(ptMin, ptMax);
+} // GetAlignedBox
+/*----------------------------------------------------------------*/
+
+
+template <typename TYPE, int DIMS>
 inline typename TAABB<TYPE,DIMS>::POINT TAABB<TYPE,DIMS>::GetCenter() const
 {
 	return (ptMax + ptMin) * TYPE(0.5);
@@ -145,19 +165,10 @@ inline void TAABB<TYPE,DIMS>::GetSize(POINT& ptSize) const
 template <typename TYPE, int DIMS>
 inline void TAABB<TYPE,DIMS>::GetCorner(BYTE i, POINT& ptCorner) const
 {
+	// use bit pattern to determine corner: 0 = min, 1 = max
 	ASSERT(i<numCorners);
-	if (DIMS == 1) {
-		ptCorner(0) = operator[](i);
-	}
-	if (DIMS == 2) {
-		ptCorner(0) = operator[]((i/2)*2 + 0);
-		ptCorner(1) = operator[]((i%2)*2 + 1);
-	}
-	if (DIMS == 3) {
-		ptCorner(0) = operator[]((i/4)*3     + 0);
-		ptCorner(1) = operator[](((i/2)%2)*3 + 1);
-		ptCorner(2) = operator[]((i%2)*3     + 2);
-	}
+	for (int j=0; j<DIMS; ++j)
+		ptCorner(j) = (i & (1 << j)) ? ptMax(j) : ptMin(j);
 }
 template <typename TYPE, int DIMS>
 inline typename TAABB<TYPE,DIMS>::POINT TAABB<TYPE,DIMS>::GetCorner(BYTE i) const
@@ -169,7 +180,7 @@ inline typename TAABB<TYPE,DIMS>::POINT TAABB<TYPE,DIMS>::GetCorner(BYTE i) cons
 template <typename TYPE, int DIMS>
 inline void TAABB<TYPE,DIMS>::GetCorners(POINT pts[numCorners]) const
 {
-	for (BYTE i=0; i<numCorners; ++i)
+	for (int i=0; i<numCorners; ++i)
 		GetCorner(i, pts[i]);
 } // GetCorners
 /*----------------------------------------------------------------*/
