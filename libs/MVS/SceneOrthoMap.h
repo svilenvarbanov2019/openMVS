@@ -35,6 +35,10 @@
 
 // I N C L U D E S /////////////////////////////////////////////////
 
+#include "../Common/ListFIFO.h"
+#include <mutex>
+#include <unordered_map>
+
 
 // S T R U C T S ///////////////////////////////////////////////////
 
@@ -50,13 +54,20 @@ struct MVS_API OrthoConfig {
 	unsigned tileOverlap;    // overlap in pixels for blending seams
 	float nadirThreshold;    // abs(dir.z) threshold for nadir camera filter
 	float marginFactor;      // AABB expansion: max(0.1f, extent * marginFactor)
+	// Step 2 parameters
+	float briefSimilarityThreshold; // BRIEF pairwise clustering threshold (0=skip clustering)
+	float consensusWeight;          // alpha: weight of cluster size vs nadir in data term
+	float smoothnessWeight;         // lambda: MRF smoothness weight
 
 	OrthoConfig()
 		: targetGSD(0)
 		, tileSize(4096)
 		, tileOverlap(16)
 		, nadirThreshold(0.3f)
-		, marginFactor(0.01f) {}
+		, marginFactor(0.01f)
+		, briefSimilarityThreshold(0.65f)
+		, consensusWeight(0.6f)
+		, smoothnessWeight(1.0f) {}
 };
 
 // computed grid layout
@@ -69,6 +80,71 @@ struct MVS_API OrthoGrid {
 	OrthoGrid() : gsd(0), tiles(0, 0) {}
 };
 
+// 256-bit BRIEF descriptor for local texture structure comparison
+struct BRIEFDescriptor {
+	uint64_t bits[4]; // 256 bits = 4 x 64-bit words
+	inline void Clear() { bits[0]=bits[1]=bits[2]=bits[3]=0; }
+	inline void SetBit(unsigned i) { bits[i/64] |= (uint64_t(1) << (i%64)); }
+	inline unsigned HammingDistance(const BRIEFDescriptor& o) const {
+		return (unsigned)(
+			PopCnt(bits[0]^o.bits[0]) +
+			PopCnt(bits[1]^o.bits[1]) +
+			PopCnt(bits[2]^o.bits[2]) +
+			PopCnt(bits[3]^o.bits[3]));
+	}
+	inline float Similarity(const BRIEFDescriptor& o) const {
+		return 1.f - (float)HammingDistance(o) / 256.f;
+	}
+};
+
+// per-block candidate view data
+struct OrthoBlockView {
+	IIndex idxView;      // scene image index
+	float nadirWeight;   // cos^2(viewDir.z), [0,1]
+	Pixel32F meanColor;  // mean BGR in block from this view (for smoothness edge weights)
+	uint32_t clusterID;  // assigned after BRIEF clustering (0-based)
+};
+typedef SEACAVE::cList<OrthoBlockView, const OrthoBlockView&, 0, 8, uint32_t> OrthoBlockViewArr;
+
+// per-block cluster data (after BRIEF clustering)
+struct OrthoBlockCluster {
+	IIndex representativeView; // MRF label: view with best nadir weight in cluster
+	float bestNadirWeight;     // nadir weight of representative
+	uint32_t size;             // number of views in this cluster
+	float dataWeight;          // MRF data term weight (combines consensus + nadir)
+};
+typedef SEACAVE::cList<OrthoBlockCluster, const OrthoBlockCluster&, 0, 4, uint32_t> OrthoBlockClusterArr;
+
+// per-block aggregated data
+struct OrthoBlock {
+	OrthoBlockViewArr views;        // candidate views (with cluster assignments)
+	OrthoBlockClusterArr clusters;  // BRIEF-derived clusters (sorted by size descending)
+	uint32_t selectedCluster;       // MRF-selected cluster index (NO_ID if none)
+	OrthoBlock() : selectedCluster(NO_ID) {}
+};
+typedef SEACAVE::cList<OrthoBlock, const OrthoBlock&, 2, 16, uint32_t> OrthoBlockArr;
+
+// thread-safe LRU image cache for orthomap pipeline
+struct OrthoImageCache {
+	struct CachedImage {
+		Image8U3 color;      // loaded BGR pixels
+		Image32F gray;       // grayscale float [0,1]
+		size_t memoryBytes;  // tracked for eviction budget
+		CachedImage() : memoryBytes(0) {}
+	};
+	std::unordered_map<IIndex, CachedImage> images;
+	ListFIFO<IIndex> fifo;
+	mutable std::mutex mutex;
+	size_t maxMemory;
+	size_t usedMemory;
+
+	OrthoImageCache() : maxMemory(0), usedMemory(0) {}
+
+	const CachedImage& UseImage(IIndex idxImage, Scene& scene);
+	void Eject();
+	void EjectOldest();
+};
+
 // per-tile data
 struct MVS_API OrthoTile {
 	Point2u tile;        // tile grid indices
@@ -77,6 +153,10 @@ struct MVS_API OrthoTile {
 	AABB3f worldBounds;  // world XY region this tile covers (Z = full scene Z range)
 	Camera camera;       // orthographic camera for this tile
 	DepthMap depthMap;   // G-buffer: depth (camera-space Z, min = highest world surface)
+	// Step 2 output
+	IIndexArr tileViews;    // unique views in selected clusters for this tile
+	OrthoBlockArr blocks;   // per-block data with cluster assignments and MRF selection
+	cv::Size blockGridSize; // block grid dimensions
 };
 typedef SEACAVE::cList<OrthoTile, const OrthoTile&, 2, 16, uint32_t> OrthoTileArr;
 
@@ -88,6 +168,7 @@ public:
 	OrthoGrid grid;
 	OrthoTileArr tiles;
 	Mesh::Octree octree;
+	OrthoImageCache imageCache;
 
 public:
 	OrthoMapContext(Scene& _scene, const OrthoConfig& _config = OrthoConfig())
@@ -108,8 +189,27 @@ public:
 	// Step 1.6: rasterize mesh faces into a single tile's depth map
 	void RasterizeTile(OrthoTile& tile, const Mesh::FaceIdxArr& tileFaces) const;
 
-	// Step 2.1: main loop -- build index, rasterize all tiles (parallel)
+	// Step 1: main loop -- build index, rasterize all tiles (parallel)
 	bool RasterizeTiles();
+
+	// Step 2: ortho project views, cluster, MRF select -- sequential tile loop
+	bool ProjectAndSelectViews();
+
+private:
+	// Step 2 helpers
+	Point3 OrthoPixelToWorld(const OrthoTile& tile, float px, float py, Depth depth) const;
+	IIndexArr FindTileViews(const OrthoTile& tile) const;
+	void OrthoProjectView(const OrthoTile& tile, IIndex idxView,
+		const OrthoImageCache::CachedImage& img,
+		OrthoBlockArr& blocks, const cv::Size& blockGrid) const;
+	BRIEFDescriptor ComputeBRIEFDescriptor(const OrthoTile& tile,
+		unsigned bx, unsigned by, const cv::Size& blockGrid,
+		IIndex idxView, const OrthoImageCache::CachedImage& img) const;
+	void ClusterBlockViews(const OrthoTile& tile,
+		OrthoBlockArr& blocks, const cv::Size& blockGrid) const;
+	void RunBlockMRF(const OrthoTile& tile,
+		OrthoBlockArr& blocks, const cv::Size& blockGrid) const;
+	static void ExtractTileViewSet(OrthoTile& tile);
 };
 /*----------------------------------------------------------------*/
 
