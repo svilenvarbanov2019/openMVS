@@ -21,9 +21,8 @@ on:
 env:
   BUILD_DIR: make
   CTEST_OUTPUT_ON_FAILURE: 1
-  CI_PARALLEL_JOBS: 2
+  CI_PARALLEL_JOBS: 3
   VCPKG_FEATURE_FLAGS: manifests,binarycaching,registries
-  VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/vcpkg-cache,readwrite
   VCPKG_COMMIT: 'c3867e714dd3a51c272826eea77267876517ed99'
 
 defaults:
@@ -35,6 +34,11 @@ jobs:
     name: Build on ${{ matrix.os }}
     if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
+    # packages:write is needed to push vcpkg binary cache to GitHub Packages NuGet
+    # feed (see VCPKG_BINARY_SOURCES configuration). contents:read is the default.
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -64,20 +68,55 @@ jobs:
         name: Checkout
         uses: actions/checkout@v4
 
-      - &cache-vcpkg-step
-        name: Cache vcpkg binary packages
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/vcpkg-cache
-          key: vcpkg-${{ env.VCPKG_DEFAULT_TRIPLET }}-${{ env.VCPKG_COMMIT }}-${{ hashFiles('vcpkg.json') }}
-          restore-keys: |
-            vcpkg-${{ env.VCPKG_DEFAULT_TRIPLET }}-${{ env.VCPKG_COMMIT }}-
-
       - &setup-vcpkg-step
         name: Setup vcpkg and cache artifacts
         uses: lukka/run-vcpkg@v11
         with:
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
+
+      - name: Install mono (required for nuget.exe on Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get install -y mono-complete
+          else
+            brew install mono
+          fi
+
+      # Use a NuGet feed hosted on GitHub Packages as vcpkg's binary cache. Each port
+      # is uploaded as its own NuGet package AS SOON AS IT FINISHES building — so even
+      # if the job hits the 6-hour Windows CI timeout mid-build, all completed ports
+      # are durably cached and the next trigger continues from there. This replaces
+      # the previous `x-gha` backend, which Microsoft removed from vcpkg in April 2025
+      # (vcpkg-tool PR #1662) without a drop-in replacement; NuGet on GH Packages is
+      # the migration path with equivalent per-port granularity.
+      # NuGet source URL must be set per-job (uses github.repository_owner).
+      - &setup-nuget-cache-step
+        name: Configure vcpkg binary cache (NuGet on GitHub Packages)
+        env:
+          # GITHUB_TOKEN has packages:write on the workflow's own repository, which
+          # is what we need to push port binaries as NuGet packages. No PAT required
+          # for in-repo CI.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUGET_FEED: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
+        run: |
+          set -euo pipefail
+          # Locate the nuget binary that vcpkg ships (Windows: nuget.exe, others: nuget run via mono)
+          NUGET="$($VCPKG_ROOT/vcpkg fetch nuget | tail -n 1)"
+          # Register the GitHub Packages NuGet feed as a vcpkg binary source.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            "$NUGET" sources add -Source "$NUGET_FEED" -StorePasswordInClearText -Name GitHubPackages \
+              -UserName "${{ github.repository_owner }}" -Password "$GH_TOKEN"
+            "$NUGET" setapikey "$GH_TOKEN" -Source "$NUGET_FEED"
+          else
+            mono "$NUGET" sources add -Source "$NUGET_FEED" -StorePasswordInClearText -Name GitHubPackages \
+              -UserName "${{ github.repository_owner }}" -Password "$GH_TOKEN"
+            mono "$NUGET" setapikey "$GH_TOKEN" -Source "$NUGET_FEED"
+          fi
+          # Tell vcpkg to use this feed for read+write binary caching.
+          # Each port becomes its own NuGet package keyed by its computed ABI hash;
+          # partial vcpkg.json changes only invalidate the affected ports.
+          echo "VCPKG_BINARY_SOURCES=clear;nuget,$NUGET_FEED,readwrite" >> "$GITHUB_ENV"
 
       - name: Install Ubuntu dependencies
         if: matrix.os == 'ubuntu-latest'
@@ -123,6 +162,7 @@ jobs:
       contents: read
       security-events: write
       actions: read
+      packages: write
     env:
       VCPKG_DEFAULT_TRIPLET: x64-windows-release
       BUILD_CONFIG: Release
@@ -130,8 +170,8 @@ jobs:
 
     steps:
       - *checkout-step
-      - *cache-vcpkg-step
       - *setup-vcpkg-step
+      - *setup-nuget-cache-step
       - *configure-step
       - *build-step
 
