@@ -21,7 +21,6 @@ on:
 env:
   BUILD_DIR: make
   CTEST_OUTPUT_ON_FAILURE: 1
-  CI_PARALLEL_JOBS: 3
   VCPKG_FEATURE_FLAGS: manifests,binarycaching,registries
   VCPKG_COMMIT: 'c3867e714dd3a51c272826eea77267876517ed99'
 
@@ -183,12 +182,16 @@ jobs:
         run: |
           rm -rf ../vcpkg/buildtrees
           rm -rf ../vcpkg/downloads
-          cmake --build . --config ${{ env.BUILD_CONFIG }} --parallel ${{ env.CI_PARALLEL_JOBS }}
+          # Two-phase build to avoid linker memory exhaustion:
+          # Phase 1: libs at 4 threads (compile-bound, per-cl.exe RSS is modest).
+          # Phase 2: apps serially (link-bound, each link gets the full runner heap).
+          cmake --build . --config ${{ env.BUILD_CONFIG }} --parallel 4 --target MVS SFM
+          cmake --build . --config ${{ env.BUILD_CONFIG }} --parallel 1
 
       - name: Unit Tests
         working-directory: ./${{ env.BUILD_DIR }}
         run: |
-          ctest --parallel ${{ env.CI_PARALLEL_JOBS }} --build-config ${{ env.BUILD_CONFIG }}
+          ctest --parallel 2 --build-config ${{ env.BUILD_CONFIG }}
 
       - name: Deploy release
         uses: actions/upload-artifact@v4

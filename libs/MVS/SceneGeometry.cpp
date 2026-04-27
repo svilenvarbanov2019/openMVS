@@ -147,9 +147,9 @@ bool Scene::EstimatePointCloudNormals(bool bRefine)
 		const RobustNormFunc& robust;
 
 		NormalOptimizationData(const PointCloud::Point& _point, const PointCloud::ViewArr& _views,
-		                       const ImageArr& _images, IIndex _targetViewIdx, const Point2f& _targetProjection,
-		                       const std::array<float,nTexels>& _targetPatch,
-		                       double _targetVariance, const Sampler& _sampler, const RobustNormFunc& _robust)
+							   const ImageArr& _images, IIndex _targetViewIdx, const Point2f& _targetProjection,
+							   const std::array<float,nTexels>& _targetPatch,
+							   double _targetVariance, const Sampler& _sampler, const RobustNormFunc& _robust)
 			: point(_point), views(_views), images(_images), targetViewIdx(_targetViewIdx),
 			  targetProjection(_targetProjection), targetPatch(_targetPatch),
 			  targetVariance(_targetVariance), sampler(_sampler), robust(_robust) {}
@@ -294,7 +294,7 @@ bool Scene::EstimatePointCloudNormals(bool bRefine)
 		Point2d paramN;
 		Normal2Dir(normal, paramN); // Convert normal to spherical coordinates
 		NormalOptimizationData optData(point, views, images, bestTargetIdx, bestProjection,
-		                               targetPatch, targetVariance, sampler, robust);
+									   targetPatch, targetVariance, sampler, robust);
 		// Setup and run lmmin optimization
 		constexpr int numParams(2);
 		lm_control_struct control{1.e-6, 1.e-7, 1.e-8, 1.e-7, 100.0, 100}; // similar to lm_control_float
@@ -493,102 +493,100 @@ Scene& Scene::CropToROI(const OBB3f& obb, unsigned minNumPoints)
 	return *this = SubScene(idxImages);
 }
 
-// increase point weights for the points close to the camera
-void PromoteClosePoints(DepthArr& pointDepths, FloatArr& pointWeights, unsigned numPointsStart, float downweightFar) {
-    const Depth thDepth = pointDepths.GetNth((pointDepths.size() + 5) / 10);
-    FOREACH(i, pointDepths) {
-        const Depth depth = pointDepths[i];
-        if (depth > thDepth)
-            pointWeights[numPointsStart+i] *= downweightFar;
-    }
-}
+
+namespace {
 
 void MinMaxScale(FloatArr &arr) {
-    if (arr.empty())
-        return;
-    const auto [minVal, maxVal] = arr.GetMinMax();
-    const float range = maxVal - minVal;
-    if (range == 0.0f)
-        return;
-    for (size_t i = 0; i < arr.size(); ++i) {
-        arr[i] = (arr[i] - minVal) / range;
-    }
+	if (arr.empty())
+		return;
+	const auto [minVal, maxVal] = arr.GetMinMax();
+	const float range = maxVal - minVal;
+	if (range == 0.0f)
+		return;
+	for (size_t i = 0; i < arr.size(); ++i) {
+		arr[i] = (arr[i] - minVal) / range;
+	}
 }
 
 // Winsorize a vector in place: limits values below the lower percentile and above the upper percentile
 void Winsorize(FloatArr& data, float lower_percentile, float upper_percentile) {
-    if (data.empty() || lower_percentile < 0.0 || upper_percentile > 100.0 || lower_percentile > upper_percentile) {
-        throw std::invalid_argument("Invalid input or percentile range");
-    }
+	if (data.empty() || lower_percentile < 0.0 || upper_percentile > 100.0 || lower_percentile > upper_percentile) {
+		throw std::invalid_argument("Invalid input or percentile range");
+	}
 
-    FloatArr sorted_data(data);
-    std::sort(sorted_data.begin(), sorted_data.end());
+	FloatArr sorted_data(data);
+	std::sort(sorted_data.begin(), sorted_data.end());
 
-    size_t n = sorted_data.size();
-    size_t lower_index = static_cast<size_t>(lower_percentile / 100.0 * (n - 1));
-    size_t upper_index = static_cast<size_t>(upper_percentile / 100.0 * (n - 1));
+	size_t n = sorted_data.size();
+	size_t lower_index = static_cast<size_t>(lower_percentile / 100.0 * (n - 1));
+	size_t upper_index = static_cast<size_t>(upper_percentile / 100.0 * (n - 1));
 
-    float lower_value = sorted_data[lower_index];
-    float upper_value = sorted_data[upper_index];
+	float lower_value = sorted_data[lower_index];
+	float upper_value = sorted_data[upper_index];
 
-    for (auto& value : data) {
-        if (value < lower_value) {
-            value = lower_value;
-        } else if (value > upper_value) {
-            value = upper_value;
-        }
-    }
+	for (auto& value : data) {
+		if (value < lower_value) {
+			value = lower_value;
+		} else if (value > upper_value) {
+			value = upper_value;
+		}
+	}
 }
 
 float RadialWeight2D(int width, int height, int x, int y, float alpha=2) {
-    float x_center = (width - 1) * 0.5f;
-    float y_center = (height - 1) * 0.5f;
+	float x_center = (width - 1) * 0.5f;
+	float y_center = (height - 1) * 0.5f;
 
-    float R = std::sqrt(x_center * x_center + y_center * y_center);
+	float R = std::sqrt(x_center * x_center + y_center * y_center);
 
-    float dx = x - x_center;
-    float dy = y - y_center;
-    float distance = std::sqrt(dx * dx + dy * dy);
+	float dx = x - x_center;
+	float dy = y - y_center;
+	float distance = std::sqrt(dx * dx + dy * dy);
 
-    float r = distance / R;
+	float r = distance / R;
 
-    float weight = 1.0f - std::pow(r, alpha);
-    return (weight > 0.0f) ? weight : 0.0f;
+	float weight = 1.0f - std::pow(r, alpha);
+	return (weight > 0.0f) ? weight : 0.0f;
 }
 
 FloatArr ComputeMeanDistanceToClosestN(const PointCloud::PointArr &pts, int numberOfNeighbors) {
-    FloatArr meanDistances(pts.size());
-    meanDistances.MemsetValue(0);
+	FloatArr meanDistances(pts.size());
+	meanDistances.MemsetValue(0);
 
-    typedef CGAL::Simple_cartesian<double>                 K;
-    typedef CGAL::Search_traits_3<K>                       TreeTraits;
-    typedef CGAL::Orthogonal_k_neighbor_search<TreeTraits> K_neighbor_search;
-    typedef K_neighbor_search::Tree                        Tree;
+	typedef CGAL::Simple_cartesian<double>				 K;
+	typedef CGAL::Search_traits_3<K>					   TreeTraits;
+	typedef CGAL::Orthogonal_k_neighbor_search<TreeTraits> K_neighbor_search;
+	typedef K_neighbor_search::Tree						Tree;
 
-    std::vector<K::Point_3> cgalPoints;
-    cgalPoints.reserve(pts.size());
-    // Convert each 3D point to a CGAL point
-    for (const auto &p: pts)
-        cgalPoints.emplace_back(static_cast<double>(p.x), static_cast<double>(p.y), static_cast<double>(p.z));
-    // Build a KD-tree for neighbor searches
-    Tree tree(cgalPoints.begin(), cgalPoints.end());
-    // For each point, find its N nearest neighbors and compute average distance
-    for (size_t i = 0; i < cgalPoints.size(); ++i) {
-        K_neighbor_search search(tree, cgalPoints[i], numberOfNeighbors);
-        double sumDist = 0.0;
-        int count = 0;
-        for (auto it = search.begin(); it != search.end(); ++it) {
-            double dist = std::sqrt(it->second);  // it->second is squared distance
-            sumDist += dist;
-            count++;
-        }
-        if (count > 0) {
-            double meanDist = sumDist / static_cast<double>(count);
-            meanDistances[i] = static_cast<float>(meanDist);
-        }
-    }
-    return meanDistances;
+	std::vector<K::Point_3> cgalPoints;
+	cgalPoints.reserve(pts.size());
+	// Convert each 3D point to a CGAL point
+	for (const auto &p: pts)
+		cgalPoints.emplace_back(static_cast<double>(p.x), static_cast<double>(p.y), static_cast<double>(p.z));
+	// Build a KD-tree for neighbor searches
+	Tree tree(cgalPoints.begin(), cgalPoints.end());
+	// For each point, find its N nearest *other* points and average their distance;
+	// query for N+1 neighbors and skip distance-0 hits (the query point itself,
+	// plus any coincident duplicates) so the mean isn't biased downward by self
+	FOREACH(i, cgalPoints) {
+		K_neighbor_search search(tree, cgalPoints[i], numberOfNeighbors + 1);
+		double sumDist = 0;
+		unsigned count = 0;
+		for (const auto& result : search) {
+			const double distSq = result.second; // result is std::pair<Point_3, double>
+			if (distSq <= 0)
+				continue; // skip self / coincident duplicates
+			sumDist += SQRT(distSq);
+			if (++count >= numberOfNeighbors)
+				break;
+		}
+		if (count > 0)
+			meanDistances[i] = static_cast<float>(sumDist / static_cast<double>(count));
+	}
+	return meanDistances;
 }
+
+} // anonymous namespace
 
 // Compute a weight for each point in the scene point cloud based on:
 //  - proximity to image center
@@ -596,63 +594,63 @@ FloatArr ComputeMeanDistanceToClosestN(const PointCloud::PointArr &pts, int numb
 //  - number of views observing the point
 //  - mean distance to closest neighbors in the point cloud
 FloatArr Scene::ROIPointWeights() const {
-    const int numberOfNeighbors = 16;
-    const float meanNeighborDistanceWLambda = 0.25f;
-    const float imageCenterWLambda = 0.25f;
-    const float numberOfViewsWLambda = 0;
-    const float depthWLambda = 1.f - meanNeighborDistanceWLambda - imageCenterWLambda - numberOfViewsWLambda;
+	const int numberOfNeighbors = 16;
+	const float meanNeighborDistanceWLambda = 0.25f;
+	const float imageCenterWLambda = 0.25f;
+	const float numberOfViewsWLambda = 0;
+	const float depthWLambda = 1.f - meanNeighborDistanceWLambda - imageCenterWLambda - numberOfViewsWLambda;
 
-    FloatArr imageCenterWeights(pointcloud.points.size());
-    FloatArr depthWeights(pointcloud.points.size());
-    FloatArr numberOfViewsWeights(pointcloud.points.size());
-    FloatArr meanDistanceToClosestN(pointcloud.points.size());
-    imageCenterWeights.MemsetValue(0);
-    depthWeights.MemsetValue(0);
+	FloatArr imageCenterWeights(pointcloud.points.size());
+	FloatArr depthWeights(pointcloud.points.size());
+	FloatArr numberOfViewsWeights(pointcloud.points.size());
+	FloatArr meanDistanceToClosestN(pointcloud.points.size());
+	imageCenterWeights.MemsetValue(0);
+	depthWeights.MemsetValue(0);
 
-    FloatArr pointcloudMeanDistanceToClosestN = ComputeMeanDistanceToClosestN(pointcloud.points, numberOfNeighbors);
-    FloatArr pointWeights(pointcloud.points.size());
-    FOREACH(idxPoint, pointcloud.points) {
-        const PointCloud::ViewArr &views = pointcloud.pointViews[idxPoint];
-        numberOfViewsWeights[idxPoint] = views.size();
-        const float meanDistanceWeight = 1.0f / (1.0f + pointcloudMeanDistanceToClosestN[idxPoint]);
-        meanDistanceToClosestN[idxPoint] = meanDistanceWeight;
-        FOREACH(idxView, views) {
-            int idxImage = views[idxView];
-            const Image &image = images[idxImage];
-            if (!image.IsValid())
-                continue;
-            const Point3f &X(pointcloud.points[idxPoint]);
-            const Point3 camX(image.camera.TransformPointW2C(Cast<REAL>(X)));
-            const Point2i pt(ROUND2INT(image.camera.TransformPointC2I(camX)));
-            if (!Image8U::isInside(pt, image.GetSize()))
-                continue;
-            const float depthWeight = 1.0f / (1.0f + camX.z);
-            depthWeights[idxPoint] += depthWeight;
-            const float imageCenterWeight = RadialWeight2D(image.width, image.height, pt.x, pt.y, 2.0f);
-            imageCenterWeights[idxPoint] += imageCenterWeight;
-        }
-    }
-    for (size_t i = 0; i < pointcloud.points.size(); ++i) {
-        depthWeights[i] /= numberOfViewsWeights[i];
-        imageCenterWeights[i] /= numberOfViewsWeights[i];
-    }
+	FloatArr pointcloudMeanDistanceToClosestN = ComputeMeanDistanceToClosestN(pointcloud.points, numberOfNeighbors);
+	FloatArr pointWeights(pointcloud.points.size());
+	FOREACH(idxPoint, pointcloud.points) {
+		const PointCloud::ViewArr &views = pointcloud.pointViews[idxPoint];
+		numberOfViewsWeights[idxPoint] = views.size();
+		const float meanDistanceWeight = 1.0f / (1.0f + pointcloudMeanDistanceToClosestN[idxPoint]);
+		meanDistanceToClosestN[idxPoint] = meanDistanceWeight;
+		FOREACH(idxView, views) {
+			int idxImage = views[idxView];
+			const Image &image = images[idxImage];
+			if (!image.IsValid())
+				continue;
+			const Point3f &X(pointcloud.points[idxPoint]);
+			const Point3 camX(image.camera.TransformPointW2C(Cast<REAL>(X)));
+			const Point2i pt(ROUND2INT(image.camera.TransformPointC2I(camX)));
+			if (!Image8U::isInside(pt, image.GetSize()))
+				continue;
+			const float depthWeight = 1.0f / (1.0f + camX.z);
+			depthWeights[idxPoint] += depthWeight;
+			const float imageCenterWeight = RadialWeight2D(image.width, image.height, pt.x, pt.y, 2.0f);
+			imageCenterWeights[idxPoint] += imageCenterWeight;
+		}
+	}
+	for (size_t i = 0; i < pointcloud.points.size(); ++i) {
+		depthWeights[i] /= numberOfViewsWeights[i];
+		imageCenterWeights[i] /= numberOfViewsWeights[i];
+	}
 
-    // Set top 10% and bottom 10% to 10th and 90th quantile, respectively
-    Winsorize(imageCenterWeights, 10.f, 90.f);
-    Winsorize(depthWeights, 10.f, 90.f);
-    Winsorize(meanDistanceToClosestN, 10.f, 90.f);
+	// Set top 10% and bottom 10% to 10th and 90th quantile, respectively
+	Winsorize(imageCenterWeights, 10.f, 90.f);
+	Winsorize(depthWeights, 10.f, 90.f);
+	Winsorize(meanDistanceToClosestN, 10.f, 90.f);
 
-    MinMaxScale(imageCenterWeights);
-    MinMaxScale(depthWeights);
-    MinMaxScale(numberOfViewsWeights);
-    MinMaxScale(meanDistanceToClosestN);
+	MinMaxScale(imageCenterWeights);
+	MinMaxScale(depthWeights);
+	MinMaxScale(numberOfViewsWeights);
+	MinMaxScale(meanDistanceToClosestN);
 
-    for (size_t i = 0; i < pointcloud.points.size(); ++i) {
-        pointWeights[i] = imageCenterWLambda * imageCenterWeights[i] +
-                          depthWLambda * depthWeights[i] +
-                          numberOfViewsWLambda * numberOfViewsWeights[i] +
-                          meanNeighborDistanceWLambda * meanDistanceToClosestN[i];
-    }
+	for (size_t i = 0; i < pointcloud.points.size(); ++i) {
+		pointWeights[i] = imageCenterWLambda * imageCenterWeights[i] +
+						  depthWLambda * depthWeights[i] +
+						  numberOfViewsWLambda * numberOfViewsWeights[i] +
+						  meanNeighborDistanceWLambda * meanDistanceToClosestN[i];
+	}
 
 	return pointWeights;
 }

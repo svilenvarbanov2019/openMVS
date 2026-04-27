@@ -12,12 +12,12 @@ On some Linux distributions, Python 3 must be specified to run the script succes
 ```
 python3 MvgMvsPipeline.py <images_folder> <output_folder>
 ```
-Option can be passed to command lines to change default settings in each step as follows:
+Options can be passed to the command line to change default settings in each step as follows:
 
 ```
 python3 MvgMvsPipeline.py <images_folder> <output_folder> --1 p HIGH n 8 --2 n ANNL2
 ```
-Where --1 refer to the first step (openMVG_main_ComputeFeatures),p refers to describerPreset option which HIGH was chosen, and n refers to numThreads which 8 was used. The second step indicated by --2 refers to openMVG_main_ComputeMatches,n refers to nearest_matching_method option which ANNL2 was chosen.
+Here `--1` selects the first step (`openMVG_main_ComputeFeatures`), where `p` sets `describerPreset` to `HIGH` and `n` sets `numThreads` to `8`. `--2` selects the second step (`openMVG_main_ComputeMatches`), where `n` sets `nearest_matching_method` to `ANNL2`.
 
 For more information, invoke -h option as follows:
 ```
@@ -90,7 +90,7 @@ After all camera views are calibrated and stitched, `OpenMVG` will generate by d
 openMVG_main_openMVG2openMVS -i sfm_data.bin -o scene.mvs -d scene_undistorted_images
 ```
 
-The directory made with the -d switch will store the undistorted images. 
+The directory made with the -d switch will store the undistorted images.
 
 ## Convert SfM scene from `COLMAP`
 
@@ -138,7 +138,7 @@ The densification module stores, along the dense scene in `MVS` format, also the
 
 ## Dense Point-Cloud Reconstruction using Semi-Global Matching (optional)
 
-Alternatively, the dense reconstruction module can estimate a dense point-cloud using Semi-Global Matching (SGM), in two steps: fist estimating disparity-maps between all valid image pairs, followed by a second step fusing them in the final point-cloud:
+Alternatively, the dense reconstruction module can estimate a dense point-cloud using Semi-Global Matching (SGM), in two steps: first estimating disparity-maps between all valid image pairs, followed by a second step fusing them in the final point-cloud:
 
 ```
 DensifyPointCloud scene.mvs --fusion-mode -1
