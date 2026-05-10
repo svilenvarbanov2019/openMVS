@@ -37,6 +37,11 @@ if(_USE_CUDA)
 	LIST(APPEND CURAST_LIBRARY_FILES_C ${CURAST_LIBRARY_FILES_CUDA})
 	SOURCE_GROUP("CURAST" FILES ${CURAST_LIBRARY_FILES_C} ${CURAST_LIBRARY_FILES_H})
 	set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --extended-lambda")
+	if(MSVC)
+		# CCCL (CUDA C++ Core Libraries, pulled in by Thrust in CURAST/curast.cu)
+		# refuses to compile under MSVC's traditional preprocessor on CUDA 13.x.
+		set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler=/Zc:preprocessor")
+	endif()
 	set(XATLAS_LIBS xatlas::xatlas)
 endif()
 
