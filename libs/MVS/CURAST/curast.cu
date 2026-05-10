@@ -2510,9 +2510,9 @@ void CollapseStacksOrtho(std::vector<CUDA::TDeviceMat<float>>& pyramidTex, float
 				auto policy = thrust::cuda::par.on(stream);
 				while (changes != 0) {
 					PropagateTag<<<gridSize, blockSize, 0, stream>>>(tagsMap, texSize);
-					auto iterIf = thrust::make_transform_iterator(thrust::make_counting_iterator<uint>(0), [tmp, tagsMap] __device__(uint idx) {
-						return (tmp[idx] != tagsMap[idx]) ? 1 : 0;
-					}); 
+					auto iterIf = thrust::make_transform_iterator(thrust::make_counting_iterator<uint>(0), [tmp, tagsMap] __host__ __device__(uint idx) -> uint {
+						return (tmp[idx] != tagsMap[idx]) ? 1u : 0u;
+					});
 					changes = thrust::reduce(policy, iterIf, iterIf + nPixels, (uint)0);
 					cudaMemcpyAsync(tmp, tagsMap, nPixels * sizeof(int), cudaMemcpyDeviceToDevice,stream);
 				}
@@ -2874,9 +2874,9 @@ void CollapseStacksOrtho(std::vector<CUDA::TDeviceMat<float>>& pyramidTex, float
 			auto policy = thrust::cuda::par.on(stream);
 			while (changes != 0) {
 				PropagateTag<<<gridSize, blockSize, 0, stream>>>(tagsMap, texSize);
-				auto iterIf = thrust::make_transform_iterator(thrust::make_counting_iterator<uint>(0), [tmp, tagsMap] __device__(uint idx) {
-					return (tmp[idx] != tagsMap[idx]) ? 1 : 0;
-				}); 
+				auto iterIf = thrust::make_transform_iterator(thrust::make_counting_iterator<uint>(0), [tmp, tagsMap] __host__ __device__(uint idx) -> uint {
+					return (tmp[idx] != tagsMap[idx]) ? 1u : 0u;
+				});
 				changes = thrust::reduce(policy, iterIf, iterIf + nPixels, (uint)0);
 				cudaMemcpyAsync(tmp, tagsMap, nPixels * sizeof(int), cudaMemcpyDeviceToDevice);
 			}
