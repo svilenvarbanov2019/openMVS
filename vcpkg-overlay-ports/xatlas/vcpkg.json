@@ -1,0 +1,10 @@
+{
+  "name": "xatlas",
+  "version-string": "last",
+  "description": "xatlas UV atlas generator (overlay port)",
+  "homepage": "https://github.com/jpcy/xatlas",
+  "dependencies": [
+    "vcpkg-cmake",
+    "vcpkg-cmake-config"
+  ]
+}
