@@ -144,7 +144,9 @@ bool Scene::TextureMeshCuda(unsigned _maxTexRes, unsigned _maxImgRes, bool rePac
 	if (mesh.faceTexcoords.empty() || !std::filesystem::exists(pathPatches) || reParametrize) {
 		// parametrization
 		{
-			VERBOSE("Mesh parametrization");
+			VERBOSE("Mesh parametrization (xatlas) starting on %u verts, %u faces",
+				mesh.vertices.size(), mesh.faces.size());
+			TD_TIMER_STARTD();
 			mesh.faceTexcoords.clear();
 			xatlas::Atlas* atlas = xatlas::Create();
 			xatlas::MeshDecl meshDecl;
@@ -158,10 +160,15 @@ bool Scene::TextureMeshCuda(unsigned _maxTexRes, unsigned _maxImgRes, bool rePac
 				 ABORT("Error: xatlas::AddMesh failed");
 				return EXIT_FAILURE;
 			}
+			VERBOSE("xatlas: AddMesh done @%s; calling ComputeCharts...", TD_TIMER_GET_FMT().c_str());
 			xatlas::ChartOptions chartOptions = xatlas::ChartOptions();
 			xatlas::ComputeCharts(atlas, chartOptions);
+			VERBOSE("xatlas: ComputeCharts done @%s (%u charts); calling PackCharts...",
+				TD_TIMER_GET_FMT().c_str(), atlas->chartCount);
 			xatlas::PackOptions packOptions = xatlas::PackOptions();
-			xatlas::PackCharts(atlas, packOptions);		
+			xatlas::PackCharts(atlas, packOptions);
+			VERBOSE("xatlas: PackCharts done @%s (%u atlases, %ux%u resolution)",
+				TD_TIMER_GET_FMT().c_str(), atlas->atlasCount, atlas->width, atlas->height);
 			const xatlas::Mesh& atlasMesh = atlas->meshes[0];
 			mesh.faceTexcoords.resize(mesh.faces.size() * 3);
 			for (int i = 0; i < mesh.faces.size(); ++i) {
