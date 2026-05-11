@@ -390,10 +390,10 @@ bool Scene::GenerateOrthoMap(const float _tileSize, const int _maxImgRes, const 
 	// views 
 	for (int yTile = 0; yTile < GridDims.y; yTile++) {
 		for (int xTile = 0; xTile < GridDims.x; xTile++) {
-			// if the option to resume est set on, 
+			// if the option to resume est set on,
 			// if the png file already exists, skip the rasterization of that tile
-			const std::string pathTile = WORKING_FOLDER + "tile_" + String::ToString(xTile) + "_" + String::ToString(yTile) + ".png";
-			if ( bResume && std::filesystem::exists(pathTile)) {
+			const String pathTile = MAKE_PATH("tile_" + String::ToString(xTile) + "_" + String::ToString(yTile) + ".png");
+			if (bResume && std::filesystem::exists(pathTile.c_str())) {
 				VERBOSE("Tile (%d,%d) already computed (%s)", xTile, yTile, pathTile.c_str());
 				continue;
 			}
@@ -543,7 +543,7 @@ bool Scene::GenerateOrthoMap(const float _tileSize, const int _maxImgRes, const 
 	// for each tile, load the tile image then accumulate the weighted colours into the ortho map
 	for (int yTile = 0; yTile < GridDims.y; ++yTile) {
 		for (int xTile = 0; xTile < GridDims.x; ++xTile) {
-			const std::string pathTile = WORKING_FOLDER + "tile_" + String::ToString(xTile) + "_" + String::ToString(yTile) + ".png";
+			const String pathTile = MAKE_PATH("tile_" + String::ToString(xTile) + "_" + String::ToString(yTile) + ".png");
 			cv::Mat tile = cv::imread(pathTile);
 			if (tile.empty()) {
 				DEBUG("Failed to load tile image: %s", pathTile.c_str());
@@ -621,7 +621,7 @@ bool Scene::GenerateOrthoMap(const float _tileSize, const int _maxImgRes, const 
 	}
 	cv::Rect roi(left, top, right - left + 1, bottom - top + 1);
 	cv::Mat cropped = orthoMap(roi).clone();
-	cv::imwrite(WORKING_FOLDER + outputName, cropped);
+	cv::imwrite(MAKE_PATH_SAFE(outputName), cropped);
 	#endif
 	return true;
 }
