@@ -127,7 +127,7 @@ bool Scene::TextureMeshCuda(unsigned _maxTexRes, unsigned _maxImgRes, bool rePac
 				cv::Scalar mean = cv::mean(visibilityMap, visibilityMap != 0);
 				VERBOSE("View %u: visibility map min = %f, max = %f, mean = %f\n", viewIdx, minVal, maxVal, mean[0]);
 				visibilityMap.convertTo(visibilityMapNorm, CV_8UC1, 255.0 / (maxVal - minVal), -minVal * 255.0 / (maxVal - minVal));
-				cv::imwrite(WORKING_FOLDER + "visibility_map_view" + String::ToString(viewIdx) + ".png", visibilityMapNorm);
+				cv::imwrite(MAKE_PATH("visibility_map_view" + String::ToString(viewIdx) + ".png"), visibilityMapNorm);
 			}
 		}
 	}
@@ -140,8 +140,8 @@ bool Scene::TextureMeshCuda(unsigned _maxTexRes, unsigned _maxImgRes, bool rePac
 	const std::vector<uint>& faceViewsRes = cudaRasterizer.GetResFaceRef();
 
 	std::vector<std::vector<uint>> patches;
-	std::string pathPatches = WORKING_FOLDER + "patches.txt";
-	if (mesh.faceTexcoords.empty() || !std::filesystem::exists(pathPatches) || reParametrize) {
+	const String pathPatches = MAKE_PATH("patches.txt");
+	if (mesh.faceTexcoords.empty() || !std::filesystem::exists(pathPatches.c_str()) || reParametrize) {
 		// parametrization
 		{
 			VERBOSE("Mesh parametrization (xatlas) starting on %u verts, %u faces",
@@ -187,7 +187,7 @@ bool Scene::TextureMeshCuda(unsigned _maxTexRes, unsigned _maxImgRes, bool rePac
 			}
 			xatlas::Destroy(atlas);
 			// save patches to patches.txt
-			std::ofstream ofs("patches.txt");
+			std::ofstream ofs(pathPatches);
 			for (const auto& patch : patches) {
 				ofs << patch.size();
 				for (uint v : patch) ofs << " " << v;
@@ -195,10 +195,10 @@ bool Scene::TextureMeshCuda(unsigned _maxTexRes, unsigned _maxImgRes, bool rePac
 			}
 		}
 	} else {
-		 //load patches from pathes.txt
-		std::ifstream ifs("patches.txt");
-		if (!ifs) 
-			DEBUG("Failed to open patches.txt");
+		 //load patches from patches.txt
+		std::ifstream ifs(pathPatches);
+		if (!ifs)
+			DEBUG("Failed to open %s", pathPatches.c_str());
 		patches.clear();
 		std::string line;
 		while (std::getline(ifs, line)) {
@@ -543,7 +543,7 @@ bool Scene::TextureMeshCuda(unsigned _maxTexRes, unsigned _maxImgRes, bool rePac
 		cudaRasterizer.CopyVisibilityMapTexToHost(validText);
 		const Image8U mask(validText == 0);
 		if (VERBOSITY_LEVEL >2)
-			mask.Save(WORKING_FOLDER + "mask_save"+ String::ToString(texIdx) +".png");
+			mask.Save(MAKE_PATH("mask_save" + String::ToString(texIdx) + ".png"));
 		if (gutterSize > 0){
 			std::vector<int> idxValidPixels;
 			idxValidPixels.push_back(-1); 
@@ -564,7 +564,7 @@ bool Scene::TextureMeshCuda(unsigned _maxTexRes, unsigned _maxImgRes, bool rePac
 			}
 		}
 		if (VERBOSITY_LEVEL > 2)
-			cv::imwrite(WORKING_FOLDER + "texture_cuda_" + String::ToString(texIdx) +".png", mesh.texturesDiffuse[texIdx]);	
+			cv::imwrite(MAKE_PATH("texture_cuda_" + String::ToString(texIdx) + ".png"), mesh.texturesDiffuse[texIdx]);
 		if (VERBOSITY_LEVEL < 3)
 			GET_LOGCONSOLE().Play();
 		progress2.close();
