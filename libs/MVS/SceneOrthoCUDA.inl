@@ -319,6 +319,14 @@ bool Scene::GenerateOrthoMap(const float _tileSize, const int _maxImgRes, const 
 		facesPerTile = std::move(bestFacesPerTile);
 		GridDims = bestGridDims;
 		nTiles = bestNTiles;
+	} else if (_tileSize == 0) {
+		// no candidate satisfied maxTileRes / GPU memory constraints during the search:
+		// fall back to the last evaluated grid but clamp the tile pixel resolution to maxTileRes
+		// so we never allocate beyond the user/GPU budget
+		if (tileRes > (uint)maxTileRes) {
+			VERBOSE("warning: no tile size satisfied max-tile-res=%d; clamping tile resolution from %u to %d", maxTileRes, tileRes, maxTileRes);
+			tileRes = (uint)maxTileRes;
+		}
 	}
 	VERBOSE("Orthomap generation with image size (%d,%d), tileSize : (%f,%f), %u tiles, tile res : %u", imageSize.width, imageSize.height, tileSize, tileSize, nTiles, tileRes);
 	
@@ -607,8 +615,8 @@ bool Scene::GenerateOrthoMap(const float _tileSize, const int _maxImgRes, const 
 	// crop empty borders on all four sides
 	int left   = orthoMap.cols;
 	int top    = orthoMap.rows;
-	int right  = 0;
-	int bottom = 0;
+	int right  = -1;
+	int bottom = -1;
 	for (int y = 0; y < orthoMap.rows; ++y) {
 		for (int x = 0; x < orthoMap.cols; ++x) {
 			if (orthoMap.at<cv::Vec3b>(y, x) != cv::Vec3b(0, 0, 0)) {
@@ -619,8 +627,10 @@ bool Scene::GenerateOrthoMap(const float _tileSize, const int _maxImgRes, const 
 			}
 		}
 	}
-	cv::Rect roi(left, top, right - left + 1, bottom - top + 1);
-	cv::Mat cropped = orthoMap(roi).clone();
+	// if the assembled orthomap is entirely empty, skip cropping (otherwise the ROI is degenerate)
+	const cv::Mat cropped = (right < left || bottom < top)
+		? orthoMap
+		: cv::Mat(orthoMap(cv::Rect(left, top, right - left + 1, bottom - top + 1)).clone());
 	cv::imwrite(MAKE_PATH_SAFE(outputName), cropped);
 	#endif
 	return true;

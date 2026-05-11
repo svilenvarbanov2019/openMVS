@@ -683,17 +683,18 @@ __global__ void ProjectNormalOrthoMap(float* depthMap, float* normalMap, const P
 void GetNormalOrthoMap(float* normalMap, Point3* positions, uint numTriangles, const Point2 tileSize, const Point2i tileRes, cudaStream_t stream, Point2 origine){
 	const uint blockSize = 64;
 	const uint gridSize = numTriangles;
-	// reset faceMap, depthMap and normalMap
+	// stream-ordered allocation; free is queued on the same stream below so no host sync is needed
 	float* depthMap;
-	cudaMalloc(&depthMap,tileRes.x()*tileRes.y()*sizeof(float));
+	const size_t numPixels = (size_t)tileRes.x() * tileRes.y();
+	cudaMallocAsync(&depthMap, numPixels * sizeof(float), stream);
 	thrust::device_ptr<float> depthPtr(depthMap);
 	thrust::device_ptr<float> normalPtr(normalMap);
-	thrust::fill(depthPtr, depthPtr + tileRes.x() * tileRes.y(), -FLT_MAX);
-	thrust::fill(normalPtr, normalPtr + tileRes.x() * tileRes.y(), 0.f);
+	thrust::fill(thrust::cuda::par.on(stream), depthPtr, depthPtr + numPixels, -FLT_MAX);
+	thrust::fill(thrust::cuda::par.on(stream), normalPtr, normalPtr + numPixels, 0.f);
 	CUDA_CHECK_LAST_ERROR;
 	ProjectNormalOrthoMap<<<gridSize, blockSize, 0, stream>>>(depthMap, normalMap, positions, numTriangles, tileSize, tileRes, origine);
 	CUDA_CHECK_LAST_ERROR;
-	cudaFree(depthMap);
+	cudaFreeAsync(depthMap, stream);
 }
 /*----------------------------------------------------------------*/
 
@@ -1297,6 +1298,10 @@ void UpdateBestViewsOrtho(int* faceMap, float* visibilityMap, float* depthMap, f
 		CUDA_CHECK_LAST_ERROR;
 
 	}
+	// bake distance-to-edge into the visibility map (matches UpdateBestViews):
+	// faces near depth edges should score lower to penalize discontinuous regions
+	MultiplyKernel<<<gridSize, blockSize, 0, stream>>>(visibilityMap, edgeMap, imgSize);
+	CUDA_CHECK_LAST_ERROR;
 	cudaFree(edgeMap);
 	float* vScorePerFace;
 	cudaMalloc(&vScorePerFace, sizeof(float) * numFaces);
@@ -1566,7 +1571,7 @@ void TextureRasterize(std::vector<CUDA::TDeviceMat<float>>& texStacks, float* te
 
 // fills per-pixel stacks for one view of a tile
 __global__ void OrthoRasterizeKernelBis(float** __restrict__ tileStacks, const uint stackSize, const Point2i tileRes, float* __restrict__ visibilityScores, const float** __restrict__ pyramidImage, const Point2i* imgSize,
-	const uint levels, const float* __restrict__ facesScore, const Point3* __restrict__ positions, const uint numViewFaces, const CUDA::Camera camera, const uint viewIdx, const Point2 tileOrigin, const Point2 tileSize) {
+	const uint levels, const float* __restrict__ facesScore, const Point3* __restrict__ positions, const uint numViewFaces, const CUDA::Camera camera, const uint viewIdx, const Point2 tileOrigin, const Point2 tileSize, float* __restrict__ depthMap) {
 	if (blockIdx.x >= numViewFaces) return;
 	const uint maxLevels = 10;
 	uint triId = blockIdx.x;
@@ -1643,6 +1648,13 @@ __global__ void OrthoRasterizeKernelBis(float** __restrict__ tileStacks, const u
 
 		Point2i baseSize = imgSize[refLevel]; // base size
 		int pix = y * tileRes.x() + x;
+		// per-view depth test: keep only the topmost (largest world-Z) surface so far for this tile pixel,
+		// matching the orthographic top-down convention used by ProjectNormalOrthoMap.
+		// atomicMaxFloat ensures the depth buffer monotonically rises and avoids the worst-case where a
+		// far triangle silently overwrites a near one; same best-effort pattern as ProjectNormalOrthoMap
+		// (a contender that already lost the depth race skips its sample writes entirely)
+		const float oldDepth = atomicMaxFloat(&depthMap[pix], (float)pW.z());
+		if ((float)pW.z() <= oldDepth) continue;
 		int baseIdx = (int)floorf(u * (baseSize.x()-1)) + (int)floorf(v*(baseSize.y()-1)) * baseSize.x(); // color base index
 		const float* __restrict__ colorBase = pyramidImage[refLevel];
 		Point3 C = samplePhotoBilinear3C(colorBase, imgSize[refLevel], u, v); // base color pixel
@@ -1676,13 +1688,15 @@ void OrthoRasterize(std::vector<CUDA::TDeviceMat<float>>& texStacks, const uint 
 	Point2i texSize = texStacks[0].CudaImageSize();
 	uint levels = pyramidImage.size();
 
-	// prepare ptr arrays
+	// stream-ordered pointer-table allocations; H2D copies stay synchronous from the host (so the host
+	// vectors below can be safely destroyed at scope exit), but the frees are queued on the stream
+	// so the device side does not require an explicit cudaDeviceSynchronize.
 	const float** d_pyramidImgPtr;
 	float** d_texStacksPtr;
 	Point2i* d_imgSizes;
-	cudaMalloc(&d_imgSizes, sizeof(Point2i) * levels);
-	cudaMalloc(&d_pyramidImgPtr, sizeof(float*) * levels);
-	cudaMalloc(&d_texStacksPtr, sizeof(float*) * levels);
+	cudaMallocAsync(&d_imgSizes, sizeof(Point2i) * levels, stream);
+	cudaMallocAsync(&d_pyramidImgPtr, sizeof(float*) * levels, stream);
+	cudaMallocAsync(&d_texStacksPtr, sizeof(float*) * levels, stream);
 	std::vector<const float*> h_pyramidImgPtr;
 	std::vector<float*> h_texStacksPtr;
 	std::vector<Point2i> h_imgSizes;
@@ -1696,14 +1710,22 @@ void OrthoRasterize(std::vector<CUDA::TDeviceMat<float>>& texStacks, const uint 
 	cudaMemcpy(d_pyramidImgPtr, h_pyramidImgPtr.data(), sizeof(float*) * levels, cudaMemcpyHostToDevice);
 	cudaMemcpy(d_texStacksPtr, h_texStacksPtr.data(), sizeof(float*) * levels, cudaMemcpyHostToDevice);
 	CUDA_CHECK_LAST_ERROR;
-	
-	OrthoRasterizeKernelBis<<<gridSize, blockSize, 0, stream>>>(d_texStacksPtr, stackSize, texSize, visibilityScores,
-	d_pyramidImgPtr, d_imgSizes, levels, faceScores, positions, numViewFaces, camera, viewIdx, tileOrigin, tileSize);
-	cudaDeviceSynchronize();
+
+	// per-tile depth buffer used by the kernel to keep only the topmost surface contribution per pixel
+	// (one float per pixel of the tile; fresh per OrthoRasterize call so it's view-local)
+	float* d_depthMap;
+	const size_t numTilePixels = (size_t)texSize.x() * texSize.y();
+	cudaMallocAsync(&d_depthMap, numTilePixels * sizeof(float), stream);
+	thrust::fill(thrust::cuda::par.on(stream), thrust::device_ptr<float>(d_depthMap), thrust::device_ptr<float>(d_depthMap) + numTilePixels, -FLT_MAX);
 	CUDA_CHECK_LAST_ERROR;
-	cudaFree(d_imgSizes);
-	cudaFree(d_pyramidImgPtr);
-	cudaFree(d_texStacksPtr);
+
+	OrthoRasterizeKernelBis<<<gridSize, blockSize, 0, stream>>>(d_texStacksPtr, stackSize, texSize, visibilityScores,
+	d_pyramidImgPtr, d_imgSizes, levels, faceScores, positions, numViewFaces, camera, viewIdx, tileOrigin, tileSize, d_depthMap);
+	CUDA_CHECK_LAST_ERROR;
+	cudaFreeAsync(d_imgSizes, stream);
+	cudaFreeAsync(d_pyramidImgPtr, stream);
+	cudaFreeAsync(d_texStacksPtr, stream);
+	cudaFreeAsync(d_depthMap, stream);
 }
 
 /*----------------------------------------------------------------*/

@@ -1,4 +1,4 @@
-﻿//#include "../Mesh.h"
+//#include "../Mesh.h"
 #include "../CUDA/DeviceBuffer.h"
 #include "../CUDA/DeviceMat.h"
 namespace MVS {
@@ -33,7 +33,7 @@ public:
 	void InitializeFaceMap(cv::Size imgSize, bool useVisibility = true);
 	// upload the camera for the given view index to device-side camera state
 	void SetCameraMatrices(const CUDA::Point3& C, const CUDA::Matrix3& R, const CUDA::Matrix3& K, const uint _viewIdx);
-	// mark which faces are visible from the given view and upload the scores of the view fort those faces
+	// mark which faces are visible from the given view and upload the scores of the view for those faces
 	void SetFacesForView(uint viewIdx, std::vector<uint>& faceList);
 	// mark only the top nBest scoring faces for the given view and upload them to the isBestView device buffer
 	void SetFacesForView(uint viewIdx, std::vector<uint>& faceList, uint nBest);
