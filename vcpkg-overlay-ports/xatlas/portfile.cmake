@@ -4,7 +4,7 @@
 vcpkg_from_github(
     OUT_SOURCE_PATH SOURCE_PATH
     REPO jpcy/xatlas
-    REF master
+    REF f700c7790aaa030e794b52ba7791a05c085faf0c
     HEAD_REF master
     SHA512 b6a285f7c5872c0549f19f56bbf3401e67eacae4d6e99ea110336a3760015f02d91371530bab6b8dc4bdbe5db321844495f9ff650e2e92701ad48591578b448a
 )

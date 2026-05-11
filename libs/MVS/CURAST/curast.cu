@@ -404,13 +404,17 @@ __global__ void ProjectMeshKernel(float* depthMap, int* faceMap, float* normalMa
 void ProjectMesh(float* depthMap, int* faceMap, float* normalMap, Point3* positions, uint numTriangles, const CUDA::Camera camera, const Point2i imgSize, cudaStream_t stream) {
 	const uint blockSize = 64;
 	const uint gridSize = numTriangles;
-	// reset faceMap, depthMap and normalMap
+	// reset faceMap, depthMap and normalMap on the caller's stream so subsequent
+	// kernel launches on the same stream see the cleared buffers (without
+	// thrust::cuda::par.on(stream) these would dispatch on Thrust's default stream
+	// and race with the kernel below)
 	thrust::device_ptr<int> facePtr(faceMap);
 	thrust::device_ptr<float> depthPtr(depthMap);
 	thrust::device_ptr<float> normalPtr(normalMap);
-	thrust::fill(facePtr, facePtr + imgSize.x() * imgSize.y(), -1);
-	thrust::fill(depthPtr, depthPtr + imgSize.x() * imgSize.y(), FLT_MAX);
-	thrust::fill(normalPtr, normalPtr + imgSize.x() * imgSize.y(), 0.f);
+	const auto policy = thrust::cuda::par.on(stream);
+	thrust::fill(policy, facePtr, facePtr + imgSize.x() * imgSize.y(), -1);
+	thrust::fill(policy, depthPtr, depthPtr + imgSize.x() * imgSize.y(), FLT_MAX);
+	thrust::fill(policy, normalPtr, normalPtr + imgSize.x() * imgSize.y(), 0.f);
 	ProjectMeshKernel<<<gridSize, blockSize, 0, stream>>>(depthMap, faceMap, normalMap, positions, numTriangles, camera, imgSize);
 	CUDA_CHECK_LAST_ERROR;
 }
@@ -1510,6 +1514,7 @@ void CollapseStacks(std::vector<CUDA::TDeviceMat<float>>& pyramidTex, float* tex
 		CUDA_CHECK_LAST_ERROR;
 		cudaFree(seedMap1_d);
 		cudaFree(seedMap2_d);
+		cudaFree(d_variationMap);
 	}
 
 	// compose final value for each pyramid stage using stacked samples
@@ -1519,7 +1524,8 @@ void CollapseStacks(std::vector<CUDA::TDeviceMat<float>>& pyramidTex, float* tex
 	SetVisibilityKernel<<<gridSize, blockSize, 0, stream>>>(d_texStacks, visibilityScores, texSize, stackSize, levelCount);
 	CUDA_CHECK_LAST_ERROR;
 	cudaFree(d_texStacks);
-	cudaFree(distanceMap);
+	// distanceMap was allocated with cudaMallocAsync — release with the matching async free
+	cudaFreeAsync(distanceMap, stream);
 }
 /*----------------------------------------------------------------*/
 

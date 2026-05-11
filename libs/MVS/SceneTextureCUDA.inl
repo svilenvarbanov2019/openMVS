@@ -15,8 +15,8 @@ struct MaxRectsBinPack : public AtlasPacker {
 	}
 };
 
-inline float TriangleTexArea(const Point2i& v0, const Point2i& v1, const Point2i& v2) {
-	return abs(0.5f * (float)((v1 - v0).cross(v2 - v0)));
+inline float TriangleTexArea(const Mesh::TexCoord& v0, const Mesh::TexCoord& v1, const Mesh::TexCoord& v2) {
+	return std::fabs(0.5f * (v1 - v0).cross(v2 - v0));
 }
 
 // morton helpers
@@ -34,7 +34,7 @@ uint64_t ExpandBits2D(uint64_t v)
 	x = (x | (x << 8))  & 0x00FF00FF00FF00FFULL;
 	x = (x | (x << 4))  & 0x0F0F0F0F0F0F0F0FULL;
 	x = (x | (x << 2))  & 0x3333333333333333ULL;
-	x = (x | (x << 1))  & 0x5555555555555555ULL; // insertion d�un z�ro
+	x = (x | (x << 1))  & 0x5555555555555555ULL; // insertion d'un zero
 	return x;
 }
 
@@ -254,8 +254,6 @@ bool Scene::TextureMeshCuda(unsigned _maxTexRes, unsigned _maxImgRes, bool rePac
 					pos += facePos; 
 					patchPixs[patchIdx] += facePixs;
 					const Mesh::TexCoord* textCoord = &mesh.faceTexcoords[faceIdx * 3];
-					float faceArea = TriangleTexArea(textCoord[0], textCoord[1], textCoord[2]);
-					patchPixs[patchIdx] += facePixs;
 					patchAreas[patchIdx] += TriangleTexArea(textCoord[0], textCoord[1], textCoord[2]);
 				
 					for (int j = 0; j < 3; ++j) {

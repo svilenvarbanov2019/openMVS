@@ -66,13 +66,13 @@ public:
 	template <size_t N>
 	void UploadFromHost(const std::array<DataType, N>& hostArray, cudaStream_t stream) {
 		ReallocateIfNotSize(hostArray.size());
-		CUDA_CHECK(cudaMemcpyAsync(data, hostArray.data(), this->SizeInBytes(), cudaMemcpyHostToDevice));
+		CUDA_CHECK(cudaMemcpyAsync(data, hostArray.data(), this->SizeInBytes(), cudaMemcpyHostToDevice, stream));
 	}
 
 	template <typename Alloc>
 	void UploadFromHost(const std::vector<DataType, Alloc>& hostVector, cudaStream_t stream) {
 		ReallocateIfNotSize(hostVector.size());
-		CUDA_CHECK(cudaMemcpyAsync(data, hostVector.data(), this->SizeInBytes(), cudaMemcpyHostToDevice));
+		CUDA_CHECK(cudaMemcpyAsync(data, hostVector.data(), this->SizeInBytes(), cudaMemcpyHostToDevice, stream));
 	}
 
 	void DownloadFromDevice(DataType* ptrHost, cudaStream_t stream) const {
@@ -83,14 +83,14 @@ public:
 	template <size_t N>
 	void DownloadFromDevice(std::array<DataType, N>& hostArray, cudaStream_t stream) const {
 		ASSERT(hostArray.size() == this->numElements);
-		CUDA_CHECK(cudaMemcpyAsync(hostArray.data(), data, this->SizeInBytes(), cudaMemcpyDeviceToHost));
+		CUDA_CHECK(cudaMemcpyAsync(hostArray.data(), data, this->SizeInBytes(), cudaMemcpyDeviceToHost, stream));
 	}
 
 	template <typename Alloc>
 	void DownloadFromDevice(std::vector<DataType, Alloc>& hostVector, cudaStream_t stream) const {
 		if (hostVector.size() != this->numElements)
 			hostVector.resize(this->numElements);
-		CUDA_CHECK(cudaMemcpyAsync(hostVector.data(), data, this->SizeInBytes(), cudaMemcpyDeviceToHost));
+		CUDA_CHECK(cudaMemcpyAsync(hostVector.data(), data, this->SizeInBytes(), cudaMemcpyDeviceToHost, stream));
 	}
 
 	void ReallocateToAtLeastSize(size_t _numElements) override {
