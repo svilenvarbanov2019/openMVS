@@ -111,6 +111,7 @@ extern MVS_API unsigned nNumViews;
 extern MVS_API unsigned nMinPixelsFuse;
 extern MVS_API unsigned nMaxPointsFuse;
 extern MVS_API unsigned nMaxFuseDepth;
+extern MVS_API unsigned nNeighborSupportRadius;
 extern MVS_API bool bAddCorners;
 extern MVS_API bool bInitSparse;
 extern MVS_API bool bRemoveDmaps;

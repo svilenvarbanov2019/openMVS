@@ -1747,6 +1747,61 @@ void DepthMapsData::DenseFuseDepthMaps(PointCloud& pointcloud, bool bEstimateCol
 		};
 		lambda(ID, x, fuseDepth, lambda);
 	};
+	// Read-only spatial corroboration for low-overlap fusion: counts neighbouring
+	// pixels in a (2*radius+1)^2 window whose 3D positions lie on the fused
+	// reference plane and round-trip via at least one already-fused view.
+	const auto CountNeighborSupport = [&](IIndex refID, const ImageRef& center, unsigned radius) -> size_t {
+		const DepthData& depthData = arrDepthData[refID];
+		const DepthData::ViewData& refView = depthData.GetView();
+		size_t count = 0;
+		for (int dr = -(int)radius; dr <= (int)radius; ++dr) {
+			for (int dc = -(int)radius; dc <= (int)radius; ++dc) {
+				if (dr == 0 && dc == 0)
+					continue;
+				const ImageRef x(center.x + dc, center.y + dr);
+				if (!Image8U::isInside(x, depthData.size))
+					continue;
+				if (arrUseMask[refID](x))
+					continue;
+				const float conf(depthData.confMap.empty() ? 1.f : depthData.confMap(x));
+				if (conf < minConfidence)
+					continue;
+				const Depth d = depthData.depthMap(x);
+				if (d <= Depth(0))
+					continue;
+				const PointCloud::Point Xadj(refView.camera.TransformPointI2W(Point3(REAL(x.x), REAL(x.y), REAL(d))));
+				if (ABS(refNormal.dot(Xadj - refPoint)) > OPTDENSE::fDepthDiffThreshold * d)
+					continue;
+				bool anyNeighborAgrees = false;
+				FOREACH(vi, fusedViews) {
+					const IIndex neighborID((IIndex)fusedViews[vi]);
+					if (neighborID == refID)
+						continue;
+					const DepthData& neighborData = arrDepthData[neighborID];
+					const DepthData::ViewData& neighborView = neighborData.GetView();
+					const auto [ptNeighbor, depthProjNeighbor] = neighborView.camera.ProjectPointP(Xadj);
+					if (depthProjNeighbor <= Depth(0))
+						continue;
+					const ImageRef neighborX(ROUND2INT(ptNeighbor));
+					if (!Image8U::isInside(neighborX, neighborData.size))
+						continue;
+					const Depth neighborDepth = neighborData.depthMap(neighborX);
+					if (neighborDepth <= Depth(0))
+						continue;
+					const PointCloud::Point Xneighbor(neighborView.camera.TransformPointI2W(Point3(REAL(neighborX.x), REAL(neighborX.y), REAL(neighborDepth))));
+					const Point3f ptBack(refView.camera.ProjectPointP3(Xneighbor));
+					const Point2f diff(ptBack.x/ptBack.z - REAL(x.x), ptBack.y/ptBack.z - REAL(x.y));
+					if (normSq(diff) <= maxReprojErrorSq) {
+						anyNeighborAgrees = true;
+						break;
+					}
+				}
+				if (anyNeighborAgrees)
+					++count;
+			}
+		}
+		return count;
+	};
 	// loop over each depth-map
 	IIndex numDMapsFused = 0;
 	while (true) {
@@ -1814,10 +1869,15 @@ void DepthMapsData::DenseFuseDepthMaps(PointCloud& pointcloud, bool bEstimateCol
 		}
 		// try to fuse each depth estimate
 		const size_t nNumPointsPrev(pointcloud.points.size());
-		for (int i=0; i<depthData.size.height; ++i) {
+			for (int i=0; i<depthData.size.height; ++i) {
 			for (int j=0; j<depthData.size.width; ++j) {
 				FusePoint(idxImage, ImageRef(j,i), 0);
-				if (fusedPoints[0].size() >= OPTDENSE::nMinPixelsFuse && fusedViews.size() >= nMinViewsFuse) {
+				size_t fusedPixels(fusedPoints[0].size());
+				if (OPTDENSE::nNeighborSupportRadius > 0 &&
+					fusedPixels < OPTDENSE::nMinPixelsFuse && fusedPixels > 1 &&
+					fusedViews.size() >= nMinViewsFuse)
+					fusedPixels += CountNeighborSupport(idxImage, ImageRef(j,i), OPTDENSE::nNeighborSupportRadius) / 2;
+				if (fusedPixels >= OPTDENSE::nMinPixelsFuse && fusedViews.size() >= nMinViewsFuse) {
 					// create the corresponding 3D point
 					pointcloud.points.emplace_back(
 						fusedPoints[0].GetMedian(),
